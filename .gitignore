@@ -1,0 +1,18 @@
+# 建置輸出與打包結果（發行 ZIP 放 GitHub Releases，不進版本庫）
+/build/
+/dist/
+/archives/
+/build-log.txt
+*.zip
+*.zip.tmp
+
+# 舊部署、備份與開發紀錄（含舊資料與本機路徑）
+/app/
+/backup/
+/evidence/
+
+# IDE／編輯器
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json

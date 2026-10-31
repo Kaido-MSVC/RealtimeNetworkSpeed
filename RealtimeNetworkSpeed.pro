@@ -1,0 +1,10 @@
+QT += widgets
+CONFIG += c++17
+TEMPLATE = app
+TARGET = RealtimeNetworkSpeed
+SOURCES += main.cpp
+HEADERS += traffic.h
+RESOURCES += app_resources.qrc
+RC_FILE = app.rc
+win32-msvc: QMAKE_CXXFLAGS += /utf-8
+win32: LIBS += -liphlpapi
