@@ -41,8 +41,7 @@ struct Verification {
         QTest::qWait(1600);
         check(window.chart->downloads.size() >= initial + 2, "live sampling advances history");
         window.timer.stop();
-        window.chart->downloads.clear();
-        window.chart->uploads.clear();
+        window.chart->clear();
         for (int i = 0; i < 121; ++i) window.chart->append(i * 1e5, i * 2e4);
         check(window.chart->downloads.size() == 120 && window.chart->uploads.size() == 120, "60 seconds / 120 samples");
         check(window.chart->downloads.first() == 1e5, "oldest sample discarded");
@@ -115,6 +114,26 @@ struct Verification {
         check(window.aboutButton && window.aboutButton->isVisibleTo(&window), "about / license button present");
         check(SpeedWindow::licensesPath().endsWith(QLatin1String("/licenses")), "licenses folder next to the executable");
 
+        // 網卡消失／恢復時，自動切換不得混用歷史。
+        traffic::InterfaceInfo fake;
+        fake.guid = "{test}"; fake.hardware = true;
+        window.savedAdapter = QStringLiteral("{test}");
+        window.updateAdapterList({fake});
+        window.chart->append(123, 456);
+        window.updateAdapterList({});
+        check(window.chart->downloads.isEmpty(), "automatic fallback clears history");
+        window.chart->append(123, 456);
+        window.updateAdapterList({fake});
+        check(window.chart->downloads.isEmpty(), "automatic restore clears history");
+        window.sampleValid = false;
+        window.refreshDisplay();
+        check(window.downloadValue->text() == QStringLiteral("—"), "invalid sample hides stale speed");
+        window.chart->clear();
+        const auto t = SpeedChart::Time{};
+        window.chart->append(100, 100, t);
+        window.chart->append(200, 200, t + std::chrono::seconds(61));
+        check(window.chart->downloads.size() == 1 && window.chart->times.size() == 1,
+              "history expires by elapsed time");
         // 讀取失敗的空檔（NaN）不影響峰值
         window.chart->clear();
         window.chart->append(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());

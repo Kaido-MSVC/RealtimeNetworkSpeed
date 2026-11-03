@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Widgets)
 
 qt_add_executable(RealtimeNetworkSpeed WIN32
     main.cpp
@@ -25,7 +25,7 @@ endif()
 
 option(BUILD_VERIFICATION "Build unit and UI verification" OFF)
 if(BUILD_VERIFICATION)
-    find_package(Qt6 REQUIRED COMPONENTS Test)
+    find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Test)
     add_executable(RealtimeNetworkSpeedVerification tests/verification.cpp app_resources.qrc)
     target_link_libraries(RealtimeNetworkSpeedVerification PRIVATE Qt6::Widgets Qt6::Test iphlpapi)
     if(MSVC)

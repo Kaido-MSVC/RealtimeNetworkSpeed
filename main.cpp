@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "traffic.h"
+#include "version.h"
 
 #pragma comment(lib, "iphlpapi.lib")
 
@@ -147,17 +148,21 @@ public:
     }
 
     // 讀取失敗時傳入 NaN：保留時間位置，線會在該處斷開。
-    void append(double download, double upload) {
+    using Time = std::chrono::steady_clock::time_point;
+    void append(double download, double upload, Time now = std::chrono::steady_clock::now()) {
+        times.append(now);
         downloads.append(download);
         uploads.append(upload);
-        if (downloads.size() > capacity) downloads.remove(0, downloads.size() - capacity);
-        if (uploads.size() > capacity) uploads.remove(0, uploads.size() - capacity);
+        while (times.size() > capacity || (!times.isEmpty() && now - times.first() > std::chrono::seconds(60))) {
+            times.removeFirst(); downloads.removeFirst(); uploads.removeFirst();
+        }
         update();
     }
 
     void clear() {
         downloads.clear();
         uploads.clear();
+        times.clear();
         update();
     }
 
@@ -214,7 +219,9 @@ protected:
             bool penDown = false;
             for (int i = 0; i < values.size(); ++i) {
                 if (!std::isfinite(values[i])) { penDown = false; continue; }
-                const qreal x = left + (right - left) * qreal(capacity - values.size() + i) / (capacity - 1.0);
+                if (i > 0 && times[i] - times[i-1] > std::chrono::seconds(2)) penDown = false;
+                const double age = std::chrono::duration<double>(times.last() - times[i]).count();
+                const qreal x = right - (right - left) * age / 60.0;
                 const qreal y = bottom - std::min(1.0, values[i] / top) * (bottom - topY);
                 if (penDown) path.lineTo(x, y); else path.moveTo(x, y);
                 penDown = true;
@@ -228,6 +235,7 @@ protected:
 
 private:
     SpeedUnit unit = SpeedUnit::Kbps;
+    QVector<Time> times;
     QVector<double> downloads;
     QVector<double> uploads;
 };
@@ -349,6 +357,7 @@ public:
             // 換網卡後舊的歷史屬於另一張網卡，清空重新累積
             chart->clear();
             currentDown = currentUp = 0;
+            hasPrevious = false;
             updateStatus();
             refreshDisplay();
         });
@@ -383,7 +392,7 @@ private:
     void showAbout() {
         const QString qt = QString::fromLatin1(qVersion());
         QMessageBox box(this);
-        box.setWindowTitle(QStringLiteral("關於即時網路速度"));
+        box.setWindowTitle(QStringLiteral("關於即時網路速度 ") + QStringLiteral(APP_VERSION));
         box.setIconPixmap(windowIcon().pixmap(48, 48));
         box.setTextFormat(Qt::RichText);
         box.setTextInteractionFlags(Qt::TextBrowserInteraction);
@@ -446,6 +455,7 @@ private:
         adapterKeys = keys;
         adapterNames = names;
 
+        const QString previousKey = adapterSelector->currentData().toString();
         const QSignalBlocker blocker(adapterSelector);
         adapterSelector->clear();
         adapterSelector->addItem(QStringLiteral("所有實體網卡"), physicalKey);
@@ -455,6 +465,11 @@ private:
         const int index = adapterSelector->findData(savedAdapter);
         // 找不到已存的網卡（例如暫時拔除）時先顯示實體網卡，但不改寫偏好
         adapterSelector->setCurrentIndex(index >= 0 ? index : 0);
+        if (!previousKey.isEmpty() && previousKey != adapterSelector->currentData().toString()) {
+            chart->clear();
+            currentDown = currentUp = 0;
+            hasPrevious = false;
+        }
     }
 
     void updateStatus() {
@@ -488,6 +503,9 @@ private:
             status->setText(error + QStringLiteral("（將自動重試）"));
             const double gap = std::numeric_limits<double>::quiet_NaN();
             chart->append(gap, gap);
+            hasPrevious = false;
+            sampleValid = false;
+            refreshDisplay();
             return;
         }
         updateAdapterList(infos);
@@ -503,6 +521,7 @@ private:
         lastInfos = std::move(infos);
         previousTime = now;
         hasPrevious = true;
+        sampleValid = true;
         currentDown = rates.down;
         currentUp = rates.up;
         updateStatus();
@@ -514,8 +533,8 @@ private:
         const SpeedUnit selected = static_cast<SpeedUnit>(std::max(0, unitSelector->currentIndex()));
         const SpeedUnit display = selected == SpeedUnit::Auto
             ? automaticUnit(std::max({currentDown, currentUp, chart->peakSpeed()})) : selected;
-        downloadValue->setText(formatSpeed(currentDown, display));
-        uploadValue->setText(formatSpeed(currentUp, display));
+        downloadValue->setText(sampleValid ? formatSpeed(currentDown, display) : QStringLiteral("—"));
+        uploadValue->setText(sampleValid ? formatSpeed(currentUp, display) : QStringLiteral("—"));
         chart->setUnit(display);
         QString text = QStringLiteral("%1；每 0.5 秒更新。1 KB/s = 8 Kbps，1 MB/s = 8 Mbps（十進位）。")
             .arg(selected == SpeedUnit::Auto ? QStringLiteral("自動：依目前速度及 60 秒峰值統一單位")
@@ -541,6 +560,7 @@ private:
     bool saveFailed = false;
     std::chrono::steady_clock::time_point previousTime;
     bool hasPrevious = false;
+    bool sampleValid = true;
 };
 
 int main(int argc, char *argv[])

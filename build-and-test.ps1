@@ -1,5 +1,5 @@
 ﻿# 建置、測試並打包「即時網路速度」。輸出同時寫入 build-log.txt。
-# 可用環境變數 QT_DIR 指定 Qt（例如 C:\Qt\6.11.2\msvc2022_64）。
+# 可用環境變數 QT_DIR 指定 Qt（例如 C:\Qt\6.12.0\msvc2022_64）。
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $log = Join-Path $root 'build-log.txt'
@@ -107,7 +107,7 @@ try {
     $savedPath = $env:PATH
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     try {
-        $proc = Start-Process -FilePath $exe -PassThru
+        $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
         Start-Sleep -Seconds 3
         $alive = -not $proc.HasExited
         if ($alive) { Stop-Process -Id $proc.Id -Force }
@@ -123,6 +123,9 @@ try {
     $archives = Join-Path $root 'archives'
     New-Item -ItemType Directory -Force -Path $archives | Out-Null
     $stamp = Get-Date -Format 'yyyy-MM-dd'
+    $versionHeader = Get-Content -LiteralPath (Join-Path $root 'version.h') -Raw
+    if ($versionHeader -notmatch '#define APP_VERSION "([0-9.]+)"') { throw 'version.h 缺少版本號' }
+    $appVersion = $Matches[1]
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     # $baseDir 底下的 $relPaths 依相對路徑放進壓縮檔的 $topFolder 資料夾；先寫 .tmp，完成才改名
     function New-Archive([string]$zipPath, [string]$topFolder, [string]$baseDir, [string[]]$relPaths) {
@@ -145,7 +148,7 @@ try {
         }
     }
 
-    New-Archive (Join-Path $archives "RealtimeNetworkSpeed-win64-$stamp.zip") 'RealtimeNetworkSpeed' $dist @(Get-RelativeFiles $dist @('.'))
+    New-Archive (Join-Path $archives "RealtimeNetworkSpeed-v$appVersion-win64-$stamp.zip") 'RealtimeNetworkSpeed' $dist @(Get-RelativeFiles $dist @('.'))
 
     # 原始碼：專案根目錄的 .cpp／.h 自動納入（不往下找，避免包進 build、backup 等資料夾）；
     # 其他建置需要的檔案列在下面，新增資源或設定檔時要一併加進清單
@@ -155,7 +158,7 @@ try {
     $sourceFiles += Get-ChildItem $root -File | Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object Name
     $sourceFiles += Get-RelativeFiles $root @('tests', 'licenses')
     $sourceFiles = @($sourceFiles | Sort-Object -Unique)
-    New-Archive (Join-Path $archives "RealtimeNetworkSpeed-source-$stamp.zip") 'RealtimeNetworkSpeed-source' $root $sourceFiles
+    New-Archive (Join-Path $archives "RealtimeNetworkSpeed-v$appVersion-source-$stamp.zip") 'RealtimeNetworkSpeed-source' $root $sourceFiles
     Log "完成：$exe"
 }
 catch {
@@ -164,3 +167,5 @@ catch {
 }
 Log "=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 結束（$(if ($failed) { '失敗' } else { '成功' })）"
 Read-Host '按 Enter 關閉視窗'
+if ($failed) { exit 1 }
+exit 0
