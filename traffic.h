@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <limits>
 #include <vector>
 
 namespace traffic {
@@ -65,6 +66,7 @@ inline std::vector<Counter> selectCounters(const std::vector<InterfaceInfo> &inf
 }
 
 struct Rates {
+    std::uint64_t inBytes = 0, outBytes = 0;
     double down = 0;            // bit/s
     double up = 0;              // bit/s
 };
@@ -74,21 +76,30 @@ struct Rates {
 inline Rates computeRates(const std::vector<Counter> &previous, const std::vector<Counter> &current, double seconds)
 {
     Rates r;
-    if (!(seconds > 0))
+    if (!(seconds > 0) || seconds > 2.0 || !std::isfinite(seconds))
         return r;
-    double inBytes = 0, outBytes = 0;
+    auto &inBytes = r.inBytes; auto &outBytes = r.outBytes;
     for (const Counter &c : current) {
         const auto it = std::find_if(previous.begin(), previous.end(),
                                      [&](const Counter &p) { return p.luid == c.luid; });
         if (it == previous.end())
             continue;
-        if (c.in >= it->in) inBytes += double(c.in - it->in);
-        if (c.out >= it->out) outBytes += double(c.out - it->out);
+        if (c.in >= it->in) inBytes += (c.in - it->in);
+        if (c.out >= it->out) outBytes += (c.out - it->out);
     }
     r.down = inBytes * 8.0 / seconds;
     r.up = outBytes * 8.0 / seconds;
     return r;
 }
+
+struct Session {
+    std::uint64_t down = 0, up = 0;
+    void add(const Rates &r) {
+        const auto max = std::numeric_limits<std::uint64_t>::max();
+        down += std::min(r.inBytes, max - down);
+        up += std::min(r.outBytes, max - up);
+    }
+};
 
 // 不小於 raw 的「好讀」刻度間距：1、2、5 × 10^n。
 inline double niceStep(double raw)

@@ -99,6 +99,45 @@ struct Verification {
         check(unitIndexFromSetting(QStringLiteral("bogus")) == 0 && unitIndexFromSetting(QStringLiteral("MB/s")) == 5
               && unitIndexFromSetting(QVariant()) == 0, "unit preference parsing");
 
+        window.topmost->setChecked(true);
+        check(window.windowFlags().testFlag(Qt::WindowStaysOnTopHint) && window.mini->windowFlags().testFlag(Qt::WindowStaysOnTopHint), "both windows stay on top");
+        check(displaySettings().value("display/topmost").toBool(), "topmost persisted");
+        {
+            SpeedWindow reopened;
+            check(reopened.topmost->isChecked() && reopened.windowFlags().testFlag(Qt::WindowStaysOnTopHint), "topmost restored from settings");
+        }
+        window.topmost->setChecked(false);
+        check(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint), "topmost removable");
+        check(window.miniValue->text().contains(window.downloadValue->text()), "mini speed synchronized");
+        window.closeToTray->setChecked(true);
+        check(displaySettings().value("display/closeToTray").toBool(), "close behavior persisted");
+        if (QSystemTrayIcon::isSystemTrayAvailable()) {
+            window.timer.start();
+            const auto hiddenInitial = window.chart->times.last();
+            QCloseEvent close;
+            window.closeEvent(&close);
+            check(!close.isAccepted() && !window.isVisible() && window.timer.isActive(), "close hides main window without exit");
+            QTest::qWait(650);
+            check(window.chart->times.last() > hiddenInitial, "sampling continues while hidden in tray");
+            window.mini->show();
+            check(window.mini->close() && !window.mini->isVisible() && window.timer.isActive(), "mini closes independently while monitoring in tray");
+            window.timer.stop();
+            window.tray->contextMenu()->actions().first()->trigger();
+            check(window.isVisible(), "tray restores main window");
+        }
+        window.closeToTray->setChecked(false);
+        window.session.down = 123;
+        for (auto *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("重設本次累積流量")) button->click();
+        check(window.session.down == 0 && !window.hasPrevious, "manual reset clears totals and baseline");
+        window.mini->show();
+        if (!captureDir.isEmpty()) {
+            window.resize(780, 700);
+            window.grab().save(captureDir + "/v1.1-main.png");
+            window.mini->grab().save(captureDir + "/v1.1-mini.png");
+        }
+        window.mini->hide();
+        window.session.down = 100;
         // 網卡選單：第一項是所有實體網卡、最後一項是全部介面；切換網卡會清空歷史並記住選擇
         check(window.adapterSelector->count() >= 2, "adapter selector populated");
         check(window.adapterSelector->itemData(0).toString() == physicalKey, "physical adapters first");
@@ -106,6 +145,7 @@ struct Verification {
         check(window.adapterSelector->itemData(allIndex).toString() == allKey, "all interfaces last");
         window.chart->append(1e6, 1e6);
         window.adapterSelector->setCurrentIndex(allIndex);
+        check(window.session.down == 0, "adapter switch clears session");
         check(window.chart->downloads.isEmpty(), "changing adapter clears history");
         check(displaySettings().value("display/adapter").toString() == allKey, "adapter preference saved");
         window.adapterSelector->setCurrentIndex(0);

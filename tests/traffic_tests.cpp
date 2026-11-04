@@ -87,6 +87,18 @@ int main()
     check(isSelectableAdapter(before[0]) && !isSelectableAdapter(before[1]) && !isSelectableAdapter(before[3]),
           "only physical adapters are selectable");
 
+    Session session;
+    auto delta = computeRates({{1, 100, 200}}, {{1, 150, 275}}, 0.5);
+    session.add(delta);
+    check(session.down == 50 && session.up == 75, "session exact byte deltas");
+    session.add(computeRates({{1, 150, 275}}, {{1, 9999, 9999}}, 60));
+    check(session.down == 50 && session.up == 75, "sleep gap excluded");
+    session.add(computeRates({{1, 150, 275}}, {{1, 1, 2}}, 0.5));
+    check(session.down == 50 && session.up == 75, "counter reset excluded");
+    session.add(computeRates({{1, 1, 2}}, {{2, 9999, 9999}}, 0.5));
+    check(session.down == 50 && session.up == 75, "new adapter baseline excluded");
+    session = {};
+    check(session.down == 0 && session.up == 0, "session reset");
     // 縱軸刻度
     check(near(niceStep(0.7), 1) && near(niceStep(1.3), 2) && near(niceStep(3), 5) && near(niceStep(7), 10),
           "nice step 1/2/5");

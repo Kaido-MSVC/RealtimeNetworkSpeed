@@ -17,6 +17,10 @@
 #include <iphlpapi.h>
 
 #include <QApplication>
+#include <QCheckBox>
+#include <QCloseEvent>
+#include <QMenu>
+#include <QSystemTrayIcon>
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
@@ -355,12 +359,56 @@ public:
             savedAdapter = adapterSelector->itemData(index).toString();
             savePreference(QStringLiteral("display/adapter"), savedAdapter);
             // 換網卡後舊的歷史屬於另一張網卡，清空重新累積
+            session = {};
             chart->clear();
             currentDown = currentUp = 0;
             hasPrevious = false;
             updateStatus();
             refreshDisplay();
         });
+
+        auto *controls = new QHBoxLayout;
+        auto *miniButton = new QPushButton(QStringLiteral("迷你視窗"));
+        topmost = new QCheckBox(QStringLiteral("視窗置頂"));
+        closeToTray = new QCheckBox(QStringLiteral("關閉時縮至系統匣"));
+        topmost->setChecked(settings.value("display/topmost", false).toBool());
+        closeToTray->setChecked(settings.value("display/closeToTray", false).toBool());
+        controls->addWidget(miniButton);
+        controls->addWidget(topmost);
+        controls->addWidget(closeToTray);
+        layout->addLayout(controls);
+        totalsLabel = new QLabel;
+        totalsLabel->setWordWrap(true);
+        layout->addWidget(totalsLabel);
+        auto *reset = new QPushButton(QStringLiteral("重設本次累積流量"));
+        layout->addWidget(reset);
+        mini = new QWidget(this, Qt::Window);
+        mini->setWindowTitle(QStringLiteral("即時網速"));
+        mini->setWindowIcon(windowIcon());
+        auto *miniLayout = new QVBoxLayout(mini);
+        miniValue = new QLabel;
+        miniValue->setMinimumWidth(240);
+        miniLayout->addWidget(miniValue);
+        auto *restore = new QPushButton(QStringLiteral("還原主視窗"));
+        miniLayout->addWidget(restore);
+        connect(restore, &QPushButton::clicked, this, [this] { showNormal(); raise(); activateWindow(); });
+        connect(miniButton, &QPushButton::clicked, this, [this] { mini->show(); });
+        connect(reset, &QPushButton::clicked, this, [this] { session = {}; hasPrevious = false; refreshDisplay(); });
+        connect(topmost, &QCheckBox::toggled, this, [this](bool on) {
+            savePreference("display/topmost", on);
+            applyTopmost(on);
+        });
+        connect(closeToTray, &QCheckBox::toggled, this, [this](bool on) { savePreference("display/closeToTray", on); });
+        tray = new QSystemTrayIcon(windowIcon(), this);
+        auto *menu = new QMenu(this);
+        menu->addAction(QStringLiteral("還原"), this, [this] { showNormal(); raise(); activateWindow(); });
+        menu->addAction(QStringLiteral("結束"), qApp, &QApplication::quit);
+        tray->setContextMenu(menu);
+        connect(tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+            if (reason == QSystemTrayIcon::DoubleClick) { showNormal(); raise(); activateWindow(); }
+        });
+        tray->show();
+        applyTopmost(topmost->isChecked());
 
         refreshDisplay();
         connect(&timer, &QTimer::timeout, this, [this] { sample(); });
@@ -466,6 +514,7 @@ private:
         // 找不到已存的網卡（例如暫時拔除）時先顯示實體網卡，但不改寫偏好
         adapterSelector->setCurrentIndex(index >= 0 ? index : 0);
         if (!previousKey.isEmpty() && previousKey != adapterSelector->currentData().toString()) {
+            session = {};
             chart->clear();
             currentDown = currentUp = 0;
             hasPrevious = false;
@@ -517,6 +566,7 @@ private:
             const traffic::Selection current = selection();
             rates = traffic::computeRates(traffic::selectCounters(lastInfos, current),
                                           traffic::selectCounters(infos, current), seconds);
+            session.add(rates);
         }
         lastInfos = std::move(infos);
         previousTime = now;
@@ -535,6 +585,10 @@ private:
             ? automaticUnit(std::max({currentDown, currentUp, chart->peakSpeed()})) : selected;
         downloadValue->setText(sampleValid ? formatSpeed(currentDown, display) : QStringLiteral("—"));
         uploadValue->setText(sampleValid ? formatSpeed(currentUp, display) : QStringLiteral("—"));
+        if (miniValue) miniValue->setText(QStringLiteral("↓ %1\n↑ %2").arg(downloadValue->text(), uploadValue->text()));
+        if (totalsLabel) totalsLabel->setText(QStringLiteral("本次累積：下載 %1 MB　上傳 %2 MB　合計 %3 MB（切換網卡範圍歸零）")
+            .arg(double(session.down)/1e6, 0, 'f', 3).arg(double(session.up)/1e6, 0, 'f', 3)
+            .arg((double(session.down)+double(session.up))/1e6, 0, 'f', 3));
         chart->setUnit(display);
         QString text = QStringLiteral("%1；每 0.5 秒更新。1 KB/s = 8 Kbps，1 MB/s = 8 Mbps（十進位）。")
             .arg(selected == SpeedUnit::Auto ? QStringLiteral("自動：依目前速度及 60 秒峰值統一單位")
@@ -544,6 +598,27 @@ private:
         note->setText(text);
     }
 
+    void applyTopmost(bool on) {
+        for (QWidget *w : {static_cast<QWidget *>(this), mini}) {
+            const bool visible = w->isVisible();
+            w->setWindowFlag(Qt::WindowStaysOnTopHint, on);
+            if (visible) w->show();
+        }
+    }
+    void closeEvent(QCloseEvent *event) override {
+        if (closeToTray->isChecked() && QSystemTrayIcon::isSystemTrayAvailable()) {
+            hide(); event->ignore();
+        } else {
+            event->accept(); qApp->quit();
+        }
+    }
+    traffic::Session session;
+    QWidget *mini = nullptr;
+    QLabel *miniValue = nullptr;
+    QLabel *totalsLabel = nullptr;
+    QCheckBox *topmost = nullptr;
+    QCheckBox *closeToTray = nullptr;
+    QSystemTrayIcon *tray = nullptr;
     QComboBox *unitSelector = nullptr;
     QComboBox *adapterSelector = nullptr;
     QLabel *note = nullptr;
