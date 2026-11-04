@@ -4,7 +4,11 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 
 作者：**Kaido-MSVC**。本程式完全在本機執行，不連網、不上傳任何資料。
 
-目前版本：**v1.1.0**。正式套件與對應原始碼見下方 Release 附件。
+目前版本：**v1.1.1**。正式套件與對應原始碼見下方 Release 附件。
+
+### v1.1.1 修正
+- 主視窗最小化或縮至系統匣時，已開啟的迷你視窗會獨立保留顯示；還原主視窗不改變迷你視窗的顯示狀態。
+- 保留迷你視窗原有標題列拖動、共同置頂與單位設定；可獨立關閉再開啟。在系統匣監看時關閉迷你視窗不會退出，完整退出時兩個視窗一併關閉。
 
 ### v1.1.0 新增功能
 - 系統匣右鍵「還原／結束」，雙擊還原主視窗。「關閉時縮至系統匣」預設關閉，可記住選擇；系統匣不可用時直接退出。
@@ -19,8 +23,8 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 
 | 附件 | 內容 |
 | --- | --- |
-| `RealtimeNetworkSpeed-1.1.0-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
-| `RealtimeNetworkSpeed-1.1.0-source.zip` | 本程式原始碼，內容與 `v1.1.0` Tag 相同 |
+| `RealtimeNetworkSpeed-1.1.1-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
+| `RealtimeNetworkSpeed-1.1.1-source.zip` | 本程式原始碼，內容與 `v1.1.1` Tag 相同 |
 | `qtbase-everywhere-src-6.12.0.tar.xz` | 隨附 Qt DLL 的完整對應原始碼（Qt 官方原始碼包，未修改） |
 | `SHA256SUMS.txt` | 上述附件的 SHA-256 |
 

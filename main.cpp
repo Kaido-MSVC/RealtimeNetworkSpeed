@@ -382,7 +382,12 @@ public:
         layout->addWidget(totalsLabel);
         auto *reset = new QPushButton(QStringLiteral("重設本次累積流量"));
         layout->addWidget(reset);
-        mini = new QWidget(this, Qt::Window);
+        // A parented Qt::Window becomes an owned HWND on Windows and follows
+        // its owner's minimization. Keep native ownership independent.
+        mini = new QWidget(nullptr, Qt::Window);
+        mini->setAttribute(Qt::WA_QuitOnClose, false);
+        mini->setStyleSheet(styleSheet());
+        connect(qApp, &QCoreApplication::aboutToQuit, mini, &QWidget::hide);
         mini->setWindowTitle(QStringLiteral("即時網速"));
         mini->setWindowIcon(windowIcon());
         auto *miniLayout = new QVBoxLayout(mini);
@@ -415,6 +420,8 @@ public:
         timer.start(500);
         sample();
     }
+
+    ~SpeedWindow() override { delete mini; }
 
 private:
     QLabel *addCard(QHBoxLayout *layout, const QString &caption, const QString &accent) {

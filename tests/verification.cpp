@@ -5,6 +5,7 @@
 #include <QTemporaryDir>
 #include <QProcess>
 #include <QDir>
+#include <QPointer>
 #include <iostream>
 
 static int failures = 0;
@@ -13,6 +14,40 @@ static void check(bool condition, const char *message) {
 }
 
 struct Verification {
+    static bool nativeVisible(QWidget *widget) {
+        const auto hwnd = reinterpret_cast<HWND>(widget->winId());
+        return IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    }
+    static int lifecycle(QApplication &app, const QString &mode) {
+        SpeedWindow window;
+        window.show();
+        window.mini->show();
+        bool quitting = false;
+        QObject::connect(&app, &QCoreApplication::aboutToQuit, &window, [&] {
+            quitting = true;
+            check(!window.mini->isVisible(), "quit hides independent mini window");
+        });
+        QTimer::singleShot(100, &window, [&] {
+            if (mode == "mini-close") {
+                window.hide();
+                window.mini->close();
+                QTimer::singleShot(150, &window, [&] {
+                    check(!quitting && window.timer.isActive(), "closing last visible mini does not quit tray monitoring");
+                    app.exit(failures ? 1 : 0);
+                });
+            } else if (mode == "tray-quit") {
+                window.closeToTray->setChecked(true);
+                window.hide();
+                window.tray->contextMenu()->actions().last()->trigger();
+            } else {
+                window.closeToTray->setChecked(false);
+                window.close();
+            }
+        });
+        const int result = app.exec();
+        check(quitting, "application exits through event loop");
+        return result || failures ? 1 : 0;
+    }
     static int restored(int expected) {
         SpeedWindow window;
         if (window.unitSelector->currentIndex() != expected)
@@ -109,23 +144,65 @@ struct Verification {
         window.topmost->setChecked(false);
         check(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint), "topmost removable");
         check(window.miniValue->text().contains(window.downloadValue->text()), "mini speed synchronized");
+        window.mini->show();
+        QTest::qWait(100);
+        check(window.mini->parentWidget() == nullptr &&
+              GetWindow(reinterpret_cast<HWND>(window.mini->winId()), GW_OWNER) == nullptr,
+              "mini has neither Qt parent nor native owner");
+        const QPoint miniPosition = window.mini->pos() + QPoint(24, 24);
+        window.mini->move(miniPosition);
+        for (bool pinned : {false, true}) {
+            window.topmost->setChecked(pinned);
+            window.showMinimized();
+            QTest::qWait(200);
+            check(IsIconic(reinterpret_cast<HWND>(window.winId())) && nativeVisible(window.mini),
+                  "native mini stays visible while main minimized, pinned and unpinned");
+            window.showNormal();
+            QTest::qWait(100);
+            check(nativeVisible(window.mini) && window.mini->pos() == miniPosition,
+                  "restoring main retains mini visibility and position");
+        }
+        window.topmost->setChecked(false);
         window.closeToTray->setChecked(true);
         check(displaySettings().value("display/closeToTray").toBool(), "close behavior persisted");
         if (QSystemTrayIcon::isSystemTrayAvailable()) {
             window.timer.start();
             const auto hiddenInitial = window.chart->times.last();
-            QCloseEvent close;
-            window.closeEvent(&close);
-            check(!close.isAccepted() && !window.isVisible() && window.timer.isActive(), "close hides main window without exit");
+            check(!window.close(), "main close ignored when sent to tray");
+            QTest::qWait(150);
+            check(nativeVisible(window.mini), "mini stays natively visible when main hides in tray");
+            check(!window.isVisible() && window.timer.isActive(), "close hides main window without exit");
             QTest::qWait(650);
             check(window.chart->times.last() > hiddenInitial, "sampling continues while hidden in tray");
             window.mini->show();
             check(window.mini->close() && !window.mini->isVisible() && window.timer.isActive(), "mini closes independently while monitoring in tray");
             window.timer.stop();
             window.tray->contextMenu()->actions().first()->trigger();
-            check(window.isVisible(), "tray restores main window");
+            check(window.isVisible() && !window.mini->isVisible(), "tray restores main without reopening closed mini");
+            for (auto *button : window.findChildren<QPushButton *>())
+                if (button->text() == QStringLiteral("迷你視窗")) button->click();
+            check(nativeVisible(window.mini), "mini can reopen after independent close");
+            window.hide();
+            window.mini->findChild<QPushButton *>()->click();
+            check(window.isVisible() && nativeVisible(window.mini), "mini restore button retains mini visibility");
         }
         window.closeToTray->setChecked(false);
+        QPointer<QWidget> ownedMini;
+        {
+            SpeedWindow temporary;
+            ownedMini = temporary.mini;
+            temporary.mini->show();
+        }
+        check(ownedMini.isNull(), "main destruction deletes independent mini");
+        for (const QString mode : {QString("mini-close"), QString("main-close"), QString("tray-quit")}) {
+            QProcess child;
+            child.start(QCoreApplication::applicationFilePath(), {"--check-lifecycle", settingsDir, mode});
+            const bool finished = child.waitForFinished(10000);
+            check(finished && child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0,
+                  qPrintable("event loop lifecycle: " + mode));
+            if (!finished) { child.kill(); child.waitForFinished(); }
+            if (child.exitCode() != 0) std::cerr << child.readAllStandardError().constData();
+        }
         window.session.down = 123;
         for (auto *button : window.findChildren<QPushButton *>())
             if (button->text() == QStringLiteral("重設本次累積流量")) button->click();
@@ -193,6 +270,10 @@ int main(int argc, char **argv) {
     if (app.arguments().size() == 4 && app.arguments()[1] == "--check-preference") {
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, app.arguments()[2]);
         return Verification::restored(app.arguments()[3].toInt());
+    }
+    if (app.arguments().size() == 4 && app.arguments()[1] == "--check-lifecycle") {
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, app.arguments()[2]);
+        return Verification::lifecycle(app, app.arguments()[3]);
     }
     QTemporaryDir settings(QDir::currentPath() + "/settings-test-XXXXXX");
     check(settings.isValid(), "isolated preference directory");
