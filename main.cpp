@@ -382,9 +382,10 @@ public:
         layout->addWidget(totalsLabel);
         auto *reset = new QPushButton(QStringLiteral("重設本次累積流量"));
         layout->addWidget(reset);
-        // A parented Qt::Window becomes an owned HWND on Windows and follows
-        // its owner's minimization. Keep native ownership independent.
-        mini = new QWidget(nullptr, Qt::Window);
+        // No Qt parent/native owner: main-window minimize/hide cannot hide mini.
+        // Tool keeps it out of the taskbar/Show Desktop; topmost is independent
+        // of the main window's saved preference. This is not a Qt::Popup.
+        mini = new QWidget(nullptr, Qt::Tool | Qt::WindowStaysOnTopHint);
         mini->setAttribute(Qt::WA_QuitOnClose, false);
         mini->setStyleSheet(styleSheet());
         connect(qApp, &QCoreApplication::aboutToQuit, mini, &QWidget::hide);
@@ -606,10 +607,19 @@ private:
     }
 
     void applyTopmost(bool on) {
-        for (QWidget *w : {static_cast<QWidget *>(this), mini}) {
-            const bool visible = w->isVisible();
-            w->setWindowFlag(Qt::WindowStaysOnTopHint, on);
-            if (visible) w->show();
+        const bool visible = isVisible();
+        setWindowFlag(Qt::WindowStaysOnTopHint, on);
+        if (visible) show();
+    }
+    void changeEvent(QEvent *event) override {
+        QWidget::changeEvent(event);
+        if (event->type() == QEvent::WindowStateChange && isMinimized()
+            && QSystemTrayIcon::isSystemTrayAvailable()) {
+            // showMinimized() can call show() after sending WindowStateChange.
+            // Hide after that transition, but never undo a restore in between.
+            QTimer::singleShot(0, this, [this] {
+                if (isMinimized()) hide();
+            });
         }
     }
     void closeEvent(QCloseEvent *event) override {

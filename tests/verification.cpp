@@ -135,14 +135,16 @@ struct Verification {
               && unitIndexFromSetting(QVariant()) == 0, "unit preference parsing");
 
         window.topmost->setChecked(true);
-        check(window.windowFlags().testFlag(Qt::WindowStaysOnTopHint) && window.mini->windowFlags().testFlag(Qt::WindowStaysOnTopHint), "both windows stay on top");
+        check(window.windowFlags().testFlag(Qt::WindowStaysOnTopHint) && window.mini->windowFlags().testFlag(Qt::WindowStaysOnTopHint), "main topmost enabled; mini always topmost");
         check(displaySettings().value("display/topmost").toBool(), "topmost persisted");
         {
             SpeedWindow reopened;
             check(reopened.topmost->isChecked() && reopened.windowFlags().testFlag(Qt::WindowStaysOnTopHint), "topmost restored from settings");
         }
         window.topmost->setChecked(false);
-        check(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint), "topmost removable");
+        check(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint), "main topmost removable");
+        check(window.mini->windowFlags().testFlag(Qt::WindowStaysOnTopHint)
+              && window.mini->windowType() == Qt::Tool, "mini is an independent always-topmost tool");
         check(window.miniValue->text().contains(window.downloadValue->text()), "mini speed synchronized");
         window.mini->show();
         QTest::qWait(100);
@@ -155,14 +157,37 @@ struct Verification {
             window.topmost->setChecked(pinned);
             window.showMinimized();
             QTest::qWait(200);
-            check(IsIconic(reinterpret_cast<HWND>(window.winId())) && nativeVisible(window.mini),
-                  "native mini stays visible while main minimized, pinned and unpinned");
+            check(nativeVisible(window.mini), "native mini stays visible while main minimized");
+            if (QSystemTrayIcon::isSystemTrayAvailable())
+                check(!IsWindowVisible(reinterpret_cast<HWND>(window.winId())),
+                      "minimized main is hidden and removed from taskbar");
             window.showNormal();
             QTest::qWait(100);
             check(nativeVisible(window.mini) && window.mini->pos() == miniPosition,
                   "restoring main retains mini visibility and position");
         }
         window.topmost->setChecked(false);
+        const auto miniHwnd = reinterpret_cast<HWND>(window.mini->winId());
+        const auto miniStyle = GetWindowLongPtr(miniHwnd, GWL_EXSTYLE);
+        check((miniStyle & WS_EX_TOPMOST) && (miniStyle & WS_EX_TOOLWINDOW)
+              && !(miniStyle & WS_EX_APPWINDOW), "native mini is topmost without taskbar entry");
+        QWidget other;
+        other.resize(700, 400);
+        other.show();
+        other.raise();
+        other.activateWindow();
+        QTest::qWait(200);
+        check(nativeVisible(window.mini) && !window.mini->isActiveWindow()
+              && (GetWindowLongPtr(miniHwnd, GWL_EXSTYLE) & WS_EX_TOPMOST),
+              "mini remains visible and topmost when another window gets focus");
+        other.hide();
+        // Restoring before the queued minimize handler runs must win.
+        window.showMinimized();
+        window.showNormal();
+        QTest::qWait(100);
+        check(nativeVisible(&window) && nativeVisible(window.mini), "immediate restore is not hidden by queued minimize");
+        check(!(GetWindowLongPtr(reinterpret_cast<HWND>(window.winId()), GWL_EXSTYLE) & WS_EX_TOOLWINDOW),
+              "restored main retains normal taskbar window style");
         window.closeToTray->setChecked(true);
         check(displaySettings().value("display/closeToTray").toBool(), "close behavior persisted");
         if (QSystemTrayIcon::isSystemTrayAvailable()) {

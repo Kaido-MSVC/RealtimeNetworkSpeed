@@ -4,7 +4,12 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 
 作者：**Kaido-MSVC**。本程式完全在本機執行，不連網、不上傳任何資料。
 
-目前版本：**v1.1.1**。正式套件與對應原始碼見下方 Release 附件。
+目前版本：**v1.1.2**。正式套件與對應原始碼見下方 Release 附件。
+
+### v1.1.2 修正
+- 主視窗最小化時隱藏工作列項目，從系統匣或迷你視窗還原後恢復一般工作列行為。
+- 迷你視窗改為獨立置頂工具視窗，不占工作列；切換其他程式、主視窗最小化、縮至系統匣及還原時持續顯示。迷你視窗置頂不受主視窗的「視窗置頂」設定影響。
+- 保留既有設定與流量監看功能；本機 UI 修正已由使用者親自驗收。
 
 ### v1.1.1 修正
 - 主視窗最小化或縮至系統匣時，已開啟的迷你視窗會獨立保留顯示；還原主視窗不改變迷你視窗的顯示狀態。
@@ -13,7 +18,7 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 ### v1.1.0 新增功能
 - 系統匣右鍵「還原／結束」，雙擊還原主視窗。「關閉時縮至系統匣」預設關閉，可記住選擇；系統匣不可用時直接退出。
 - 「迷你視窗」同步顯示即時下載／上傳速度與所選單位，可獨立關閉及還原主視窗。
-- 「視窗置頂」同時套用主視窗與迷你視窗，保存至既有 INI 設定。
+- 「視窗置頂」控制主視窗，保存至既有 INI 設定；自 v1.1.2 起迷你視窗固定獨立置頂。
 - 本次監看累積下載／上傳／合計量，以十進位 MB 顯示，從有效位元組差值累加；重啟程式、手動重設或監看範圍切換時歸零。
 - 計數器倒退、新介面及讀取失敗空檔不補算；取樣間隔超過 2 秒（例如休眠或長時間停頓）重新建立基準，該空檔不計入累積。因此本功能是有效取樣累積，並非帳單流量統計。
 - 新設定鍵：`display/topmost`、`display/closeToTray`，均預設 false。
@@ -23,8 +28,8 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 
 | 附件 | 內容 |
 | --- | --- |
-| `RealtimeNetworkSpeed-1.1.1-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
-| `RealtimeNetworkSpeed-1.1.1-source.zip` | 本程式原始碼，內容與 `v1.1.1` Tag 相同 |
+| `RealtimeNetworkSpeed-1.1.2-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
+| `RealtimeNetworkSpeed-1.1.2-source.zip` | 本程式原始碼，內容與 `v1.1.2` Tag 相同 |
 | `qtbase-everywhere-src-6.12.0.tar.xz` | 隨附 Qt DLL 的完整對應原始碼（Qt 官方原始碼包，未修改） |
 | `SHA256SUMS.txt` | 上述附件的 SHA-256 |
 
@@ -53,7 +58,7 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 | 鍵 | 值 |
 | --- | --- |
 | `display/unit` | `auto`、`Kbps`、`Mbps`、`Gbps`、`KB/s`、`MB/s`（舊版存的 0～5 整數仍可讀取） |
-| `display/topmost` | `true`／`false`，預設 `false`，主視窗與迷你視窗共同置頂 |
+| `display/topmost` | `true`／`false`，預設 `false`，控制主視窗置頂；迷你視窗固定獨立置頂 |
 | `display/closeToTray` | `true`／`false`，預設 `false`；系統匣不可用時直接退出 |
 | `display/adapter` | `physical`、`all` 或網卡 GUID（例如 `{xxxxxxxx-...}`） |
 
