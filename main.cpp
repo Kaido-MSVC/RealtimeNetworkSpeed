@@ -17,6 +17,12 @@
 #include <iphlpapi.h>
 
 #include <QApplication>
+#include <QDateTime>
+#include <QDialog>
+#include <QPlainTextEdit>
+#include <QFileDialog>
+#include <QSaveFile>
+#include <QNetworkInterface>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QMenu>
@@ -78,6 +84,15 @@ static bool readInterfaces(std::vector<traffic::InterfaceInfo> &infos, QString &
         info.filter = row.InterfaceAndOperStatusFlags.FilterInterface;
         info.hardware = row.InterfaceAndOperStatusFlags.HardwareInterface;
         info.up = row.OperStatus == IfOperStatusUp;
+        info.index = row.InterfaceIndex;
+        info.operStatus = row.OperStatus;
+        info.adminStatus = row.AdminStatus;
+        info.receiveLink = row.ReceiveLinkSpeed;
+        info.transmitLink = row.TransmitLinkSpeed;
+        QStringList mac;
+        for (ULONG b = 0; b < std::min<ULONG>(row.PhysicalAddressLength, IF_MAX_PHYS_ADDRESS_LENGTH); ++b)
+            mac << QStringLiteral("%1").arg(row.PhysicalAddress[b], 2, 16, QLatin1Char('0'));
+        info.mac = mac.join(QLatin1Char(':')).toUpper().toStdString();
         info.inOctets = row.InOctets;
         info.outOctets = row.OutOctets;
         infos.push_back(std::move(info));
@@ -135,6 +150,39 @@ static QString formatSpeed(double bitsPerSecond, SpeedUnit unit) {
     const double value = bitsPerSecond / divisor;
     const int decimals = value > 0 && value < 1 ? 3 : (value >= 1 && value < 10 ? 2 : 1);
     return QStringLiteral("%1 %2").arg(value, 0, 'f', decimals).arg(QLatin1String(name));
+}
+
+struct CsvRecord {
+    QString timestamp, adapter, key;
+    traffic::Rates rates;
+    traffic::Session session;
+};
+
+static QString csvText(QString value) {
+    const QString trimmed = value.trimmed();
+    if (!trimmed.isEmpty() && QStringLiteral("=+-@").contains(trimmed.front())) value.prepend(QChar(0x27));
+    value.replace(QLatin1String("\""), QLatin1String("\"\""));
+    return QLatin1Char('"') + value + QLatin1Char('"');
+}
+
+static bool writeCsv(const QString &path, const std::vector<CsvRecord> &records, QString &error) {
+    QSaveFile file(path); // default: no direct-write fallback, preserve existing file on failure
+    if (!file.open(QIODevice::WriteOnly)) { error = file.errorString(); return false; }
+    auto write = [&](const QByteArray &bytes) { return file.write(bytes) == bytes.size(); };
+    bool ok = write(QByteArray::fromHex("efbbbf")) && write(
+        "Timestamp,Adapter,Download_Bps,Upload_Bps,Total_Download,Total_Upload,Adapter_ID,Sample_Seconds,Active_Seconds,Average_Download_Bps,Average_Upload_Bps,Peak_Download_Bps,Peak_Upload_Bps\r\n");
+    for (const auto &r : records) {
+        if (!ok) break;
+        const auto n = [](double value) { return QString::number(value, 'g', 17); };
+        const QStringList fields = {csvText(r.timestamp), csvText(r.adapter), n(r.rates.down / 8), n(r.rates.up / 8),
+            QString::number(qulonglong(r.session.down)), QString::number(qulonglong(r.session.up)), csvText(r.key),
+            n(r.rates.seconds), n(r.session.seconds), n(r.session.averageDown() / 8), n(r.session.averageUp() / 8),
+            n(r.session.peakDown / 8), n(r.session.peakUp / 8)};
+        ok = write((fields.join(QLatin1Char(',')) + QStringLiteral("\r\n")).toUtf8());
+    }
+    if (!ok) { error = file.errorString(); file.cancelWriting(); return false; }
+    if (!file.commit()) { error = file.errorString(); return false; }
+    return true;
 }
 
 class SpeedChart final : public QWidget {
@@ -250,8 +298,8 @@ public:
     SpeedWindow() {
         setWindowTitle(QStringLiteral("即時網路速度"));
         setWindowIcon(QIcon(QStringLiteral(":/app.ico")));
-        resize(780, 570);
-        setMinimumSize(650, 500);
+        resize(850, 760);
+        setMinimumSize(760, 720);
         setStyleSheet(QStringLiteral("QWidget { background:#f3f6fb; color:#172033; font-family:'Microsoft JhengHei UI'; }"));
 
         auto *layout = new QVBoxLayout(this);
@@ -305,6 +353,10 @@ public:
         optionRow->addSpacing(16);
         optionRow->addWidget(unitLabel);
         optionRow->addWidget(unitSelector);
+        auto *infoButton = new QPushButton(QStringLiteral("網卡資訊"));
+        infoButton->setObjectName(QStringLiteral("adapterInfoButton"));
+        optionRow->addWidget(infoButton);
+        connect(infoButton, &QPushButton::clicked, this, [this] { showAdapterInfo(); });
         layout->addLayout(optionRow);
 
         auto *cards = new QHBoxLayout;
@@ -359,12 +411,8 @@ public:
             savedAdapter = adapterSelector->itemData(index).toString();
             savePreference(QStringLiteral("display/adapter"), savedAdapter);
             // 換網卡後舊的歷史屬於另一張網卡，清空重新累積
-            session = {};
-            chart->clear();
-            currentDown = currentUp = 0;
-            hasPrevious = false;
+            clearStatistics();
             updateStatus();
-            refreshDisplay();
         });
 
         auto *controls = new QHBoxLayout;
@@ -380,8 +428,23 @@ public:
         totalsLabel = new QLabel;
         totalsLabel->setWordWrap(true);
         layout->addWidget(totalsLabel);
-        auto *reset = new QPushButton(QStringLiteral("重設本次累積流量"));
-        layout->addWidget(reset);
+        statsLabel = new QLabel;
+        statsLabel->setWordWrap(true);
+        layout->addWidget(statsLabel);
+        auto *actions = new QHBoxLayout;
+        pauseButton = new QPushButton(QStringLiteral("暫停監控"));
+        pauseButton->setObjectName(QStringLiteral("pauseButton"));
+        auto *reset = new QPushButton(QStringLiteral("清空本次統計"));
+        reset->setObjectName(QStringLiteral("resetButton"));
+        exportButton = new QPushButton(QStringLiteral("匯出 CSV…"));
+        exportButton->setObjectName(QStringLiteral("exportButton"));
+        actions->addWidget(pauseButton);
+        actions->addWidget(reset);
+        actions->addStretch();
+        actions->addWidget(exportButton);
+        layout->addLayout(actions);
+        connect(pauseButton, &QPushButton::clicked, this, [this] { setPaused(!paused); });
+        connect(exportButton, &QPushButton::clicked, this, [this] { exportCsv(); });
         // No Qt parent/native owner: main-window minimize/hide cannot hide mini.
         // Tool keeps it out of the taskbar/Show Desktop; topmost is independent
         // of the main window's saved preference. This is not a Qt::Popup.
@@ -399,7 +462,7 @@ public:
         miniLayout->addWidget(restore);
         connect(restore, &QPushButton::clicked, this, [this] { showNormal(); raise(); activateWindow(); });
         connect(miniButton, &QPushButton::clicked, this, [this] { mini->show(); });
-        connect(reset, &QPushButton::clicked, this, [this] { session = {}; hasPrevious = false; refreshDisplay(); });
+        connect(reset, &QPushButton::clicked, this, [this] { clearStatistics(); });
         connect(topmost, &QCheckBox::toggled, this, [this](bool on) {
             savePreference("display/topmost", on);
             applyTopmost(on);
@@ -511,26 +574,21 @@ private:
         adapterKeys = keys;
         adapterNames = names;
 
-        const QString previousKey = adapterSelector->currentData().toString();
         const QSignalBlocker blocker(adapterSelector);
         adapterSelector->clear();
         adapterSelector->addItem(QStringLiteral("所有實體網卡"), physicalKey);
         for (int i = 0; i < keys.size(); ++i)
-            adapterSelector->addItem(names[i], keys[i]);
+            adapterSelector->addItem(names[i].simplified(), keys[i]);
+        if (savedAdapter != physicalKey && savedAdapter != allKey && !savedAdapter.isEmpty()
+            && !keys.contains(savedAdapter))
+            adapterSelector->addItem(QStringLiteral("所選網卡目前不存在（%1）").arg(savedAdapter), savedAdapter);
         adapterSelector->addItem(QStringLiteral("全部介面（含 VPN／虛擬網卡，可能重複計算）"), allKey);
         const int index = adapterSelector->findData(savedAdapter);
-        // 找不到已存的網卡（例如暫時拔除）時先顯示實體網卡，但不改寫偏好
         adapterSelector->setCurrentIndex(index >= 0 ? index : 0);
-        if (!previousKey.isEmpty() && previousKey != adapterSelector->currentData().toString()) {
-            session = {};
-            chart->clear();
-            currentDown = currentUp = 0;
-            hasPrevious = false;
-        }
     }
 
     void updateStatus() {
-        if (lastInfos.empty()) return;
+
         const traffic::Selection current = selection();
         QStringList counted;
         for (const traffic::InterfaceInfo &i : lastInfos)
@@ -550,16 +608,24 @@ private:
                   : QStringLiteral("實體網卡 %1 張").arg(counted.size());
             break;
         }
-        status->setText(QStringLiteral("監看中・每 0.5 秒更新　|　%1").arg(scope));
+        status->setText(QStringLiteral("%1　|　%2").arg(paused ? QStringLiteral("已暫停・數值凍結")
+            : QStringLiteral("監看中・每 0.5 秒更新"), scope));
     }
 
     void sample() {
+        if (paused) return;
         std::vector<traffic::InterfaceInfo> infos;
         QString error;
-        if (!readInterfaces(infos, error)) {
+        const bool ok = readInterfaces(infos, error);
+        processSample(std::move(infos), ok, std::chrono::steady_clock::now(), error);
+    }
+
+    void processSample(std::vector<traffic::InterfaceInfo> infos, bool ok, SpeedChart::Time now, const QString &error = {}) {
+        if (paused) return;
+        if (!ok) {
             status->setText(error + QStringLiteral("（將自動重試）"));
             const double gap = std::numeric_limits<double>::quiet_NaN();
-            chart->append(gap, gap);
+            chart->append(gap, gap, now);
             hasPrevious = false;
             sampleValid = false;
             refreshDisplay();
@@ -567,7 +633,6 @@ private:
         }
         updateAdapterList(infos);
 
-        const auto now = std::chrono::steady_clock::now();
         traffic::Rates rates;
         if (hasPrevious) {
             const double seconds = std::chrono::duration<double>(now - previousTime).count();
@@ -579,11 +644,21 @@ private:
         lastInfos = std::move(infos);
         previousTime = now;
         hasPrevious = true;
-        sampleValid = true;
+        sampleValid = rates.seconds > 0;
+        if (sampleValid) {
+            QString name = adapterSelector->currentText();
+            const auto scope = selection();
+            if (scope.scope == traffic::Scope::Single)
+                for (const auto &i : lastInfos) if (i.guid == scope.guid) { name = adapterName(i); break; }
+            const auto timestamp = QDateTime::currentDateTime();
+            records.push_back({timestamp.toOffsetFromUtc(timestamp.offsetFromUtc()).toString(Qt::ISODateWithMs),
+                name, adapterSelector->currentData().toString(), rates, session});
+        }
         currentDown = rates.down;
         currentUp = rates.up;
         updateStatus();
-        chart->append(rates.down, rates.up);
+        const double gap = std::numeric_limits<double>::quiet_NaN();
+        chart->append(sampleValid ? rates.down : gap, sampleValid ? rates.up : gap, now);
         refreshDisplay();
     }
 
@@ -597,6 +672,18 @@ private:
         if (totalsLabel) totalsLabel->setText(QStringLiteral("本次累積：下載 %1 MB　上傳 %2 MB　合計 %3 MB（切換網卡範圍歸零）")
             .arg(double(session.down)/1e6, 0, 'f', 3).arg(double(session.up)/1e6, 0, 'f', 3)
             .arg((double(session.down)+double(session.up))/1e6, 0, 'f', 3));
+        if (statsLabel) statsLabel->setText(QStringLiteral("平均：↓ %1　↑ %2\n峰值：↓ %3　↑ %4　｜有效取樣 %5 秒")
+            .arg(formatSpeed(session.averageDown(), display), formatSpeed(session.averageUp(), display),
+                 formatSpeed(session.peakDown, display), formatSpeed(session.peakUp, display))
+            .arg(session.seconds, 0, 'f', 1));
+        const QString tooltip = QStringLiteral("%1\n%2\n%3")
+            .arg(status->text(), totalsLabel->text(), statsLabel->text());
+        downloadValue->setToolTip(tooltip);
+        uploadValue->setToolTip(tooltip);
+        miniValue->setToolTip(tooltip);
+        tray->setToolTip(QStringLiteral("%1\n↓ %2　↑ %3").arg(paused ? QStringLiteral("已暫停") : QStringLiteral("監看中"), downloadValue->text(), uploadValue->text()));
+        mini->setWindowTitle(paused ? QStringLiteral("即時網速（已暫停）") : QStringLiteral("即時網速"));
+        exportButton->setEnabled(!records.empty());
         chart->setUnit(display);
         QString text = QStringLiteral("%1；每 0.5 秒更新。1 KB/s = 8 Kbps，1 MB/s = 8 Mbps（十進位）。")
             .arg(selected == SpeedUnit::Auto ? QStringLiteral("自動：依目前速度及 60 秒峰值統一單位")
@@ -604,6 +691,94 @@ private:
         if (saveFailed)
             text += QStringLiteral("（偏好儲存失敗）");
         note->setText(text);
+    }
+
+    void clearStatistics() {
+        session = {};
+        records.clear();
+        chart->clear();
+        currentDown = currentUp = 0;
+        hasPrevious = false;
+        sampleValid = false;
+        updateStatus();
+        refreshDisplay();
+    }
+
+    void setPaused(bool value) {
+        if (paused == value) return;
+        paused = value;
+        hasPrevious = false;
+        pauseButton->setText(paused ? QStringLiteral("恢復監控") : QStringLiteral("暫停監控"));
+        if (paused) timer.stop();
+        else { sampleValid = false; timer.start(500); sample(); }
+        updateStatus();
+        refreshDisplay();
+    }
+
+    QString adapterDetails(const std::vector<traffic::InterfaceInfo> &infos, const QList<QNetworkInterface> &networks) const {
+        QStringList details;
+        const auto current = selection();
+        for (const auto &i : infos) {
+            if (!traffic::isSelectableAdapter(i)) continue;
+            if (current.scope == traffic::Scope::Single && i.guid != current.guid) continue;
+            if (current.scope == traffic::Scope::Physical && !i.hardware) continue;
+            QStringList ips;
+            for (const auto &network : networks) {
+                if (network.index() != int(i.index)) continue;
+                for (const auto &entry : network.addressEntries()) ips << entry.ip().toString();
+            }
+            const auto link = [](std::uint64_t speed) {
+                return speed == 0 || speed == std::numeric_limits<std::uint64_t>::max()
+                    ? QStringLiteral("未知") : formatSpeed(double(speed), automaticUnit(double(speed)));
+            };
+            const QStringList states = {QStringLiteral("已連線"), QStringLiteral("未連線"), QStringLiteral("測試中"),
+                QStringLiteral("未知"), QStringLiteral("等待連線"), QStringLiteral("裝置不存在"), QStringLiteral("下層連線中斷")};
+            const QString state = i.operStatus >= 1 && i.operStatus <= 7 ? states[int(i.operStatus) - 1] : QStringLiteral("未知");
+            const QString enabled = i.adminStatus == 1 ? QStringLiteral("已啟用")
+                : i.adminStatus == 2 ? QStringLiteral("已停用") : QStringLiteral("其他狀態");
+            details << QStringLiteral("%1\nGUID：%2\n類型：%3　狀態：%4（%5）\nIP：%6\nMAC：%7\n連線速度：接收 %8／傳送 %9")
+                .arg(adapterName(i), QString::fromStdString(i.guid),
+                    i.hardware ? QStringLiteral("實體") : QStringLiteral("VPN／虛擬"),
+                    state).arg(enabled)
+                .arg(ips.isEmpty() ? QStringLiteral("無可用 IPv4／IPv6 位址") : ips.join(QStringLiteral("、")),
+                     i.mac.empty() ? QStringLiteral("無") : QString::fromStdString(i.mac), link(i.receiveLink), link(i.transmitLink));
+        }
+        return details.isEmpty() ? QStringLiteral("所選範圍目前沒有可用網卡；選擇會保留，等待網卡重新出現。")
+            : details.join(QStringLiteral("\n\n"));
+    }
+
+    void showAdapterInfo() {
+        // Explicit refresh also works while monitoring is paused; no traffic is accumulated.
+        std::vector<traffic::InterfaceInfo> infos;
+        QString error;
+        if (!readInterfaces(infos, error)) { QMessageBox::warning(this, QStringLiteral("網卡資訊"), error); return; }
+        const QString details = adapterDetails(infos, QNetworkInterface::allInterfaces());
+        QDialog box(this);
+        box.setWindowTitle(QStringLiteral("網卡資訊"));
+        box.resize(660, 460);
+        auto *layout = new QVBoxLayout(&box);
+        auto *text = new QPlainTextEdit(&box);
+        text->setReadOnly(true);
+        text->setPlainText(QStringLiteral("目前監看範圍：%1\n\n%2")
+            .arg(adapterSelector->currentText(), details));
+        layout->addWidget(text);
+        auto *close = new QPushButton(QStringLiteral("關閉"), &box);
+        layout->addWidget(close, 0, Qt::AlignRight);
+        connect(close, &QPushButton::clicked, &box, &QDialog::accept);
+        box.exec();
+    }
+
+    void exportCsv() {
+        // Freeze the snapshot before the native save dialog's nested event loop.
+        const auto snapshot = records;
+        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("匯出本次監控紀錄"),
+            QStringLiteral("網速統計-%1.csv").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))),
+            QStringLiteral("CSV 檔案 (*.csv)"));
+        if (path.isEmpty()) return;
+        QString error;
+        if (!writeCsv(path, snapshot, error))
+            QMessageBox::warning(this, QStringLiteral("匯出失敗"), QStringLiteral("無法儲存 CSV：%1").arg(error));
+        else QMessageBox::information(this, QStringLiteral("匯出完成"), QStringLiteral("已儲存 %1 筆紀錄至\n%2").arg(snapshot.size()).arg(path));
     }
 
     void applyTopmost(bool on) {
@@ -629,6 +804,11 @@ private:
             event->accept(); qApp->quit();
         }
     }
+    bool paused = false;
+    std::vector<CsvRecord> records;
+    QLabel *statsLabel = nullptr;
+    QPushButton *pauseButton = nullptr;
+    QPushButton *exportButton = nullptr;
     traffic::Session session;
     QWidget *mini = nullptr;
     QLabel *miniValue = nullptr;

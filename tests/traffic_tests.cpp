@@ -84,8 +84,8 @@ int main()
     check(near(computeRates({}, {}, 0).down, 0), "zero interval is safe");
 
     // 網卡選單候選
-    check(isSelectableAdapter(before[0]) && !isSelectableAdapter(before[1]) && !isSelectableAdapter(before[3]),
-          "only physical adapters are selectable");
+    check(isSelectableAdapter(before[0]) && !isSelectableAdapter(before[1]) && isSelectableAdapter(before[3]),
+          "physical and VPN adapters selectable; filters excluded");
 
     Session session;
     auto delta = computeRates({{1, 100, 200}}, {{1, 150, 275}}, 0.5);

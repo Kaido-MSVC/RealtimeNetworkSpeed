@@ -1,5 +1,5 @@
 ﻿Qt 6.12.0 內含的第三方元件
-依 Qt 官方建置的 SBOM（qtbase-6.12.0.spdx.json）列出本程式隨附的 Qt Core、Qt GUI、Qt Widgets、
+依 Qt 官方建置的 SBOM（qtbase-6.12.0.spdx.json）列出本程式隨附的 Qt Core、Qt GUI、Qt Widgets、Qt Network、
 Windows 平台外掛、Windows 樣式外掛、ICO 圖片外掛中所含的第三方程式碼；
 資料取自官方 qtbase-everywhere-src-6.12.0 原始碼中的 qt_attribution.json 與授權檔。
 Third-party components contained in the Qt 6.12.0 modules and plugins shipped with this program.
@@ -3705,3 +3705,47 @@ OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
 TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 
+
+
+==============================================================================
+Qt Network — The Public Suffix List / libpsl
+本機介面列舉使用 Qt Network；DLL 內含下列元件，未使用其網路連線或 Cookie 功能。
+The Public Suffix List, version 2026-05-14_08-35-31_UTC
+The list was originally provided by Jo Hermans <jo.hermans@gmail.com>.
+It is now maintained on github (https://github.com/publicsuffix/list).
+License: MPL-2.0; full text: MPL-2.0.txt.
+Source: bundled qtbase-everywhere-src-6.12.0.tar.xz, src/3rdparty/libpsl/psl_data.cpp.
+libpsl, commit 664f3dc85259ec65e30248a61fa1c45b7b0e4c3f
+Copyright 2014-2016 The Chromium Authors. All rights reserved.
+License: BSD-3-Clause; canonical full text: BSD-3-Clause.txt.
+Original required notice from bundled Qt source, src/3rdparty/libpsl/src/LICENSE.chromium:
+* The following License is for the source code files
+  psl-make-dafsa and lookup_string_in_fixed_set.c.
+
+// Copyright 2015 The Chromium Authors. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//    * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//    * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//    * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

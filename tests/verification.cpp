@@ -14,6 +14,117 @@ static void check(bool condition, const char *message) {
 }
 
 struct Verification {
+    static void verifyV12(SpeedWindow &w, const QString &captureDir) {
+        w.timer.stop();
+        w.adapterSelector->setCurrentIndex(0);
+        w.clearStatistics();
+        traffic::InterfaceInfo nic;
+        nic.luid = 1234; nic.guid = "{vpn-test}"; nic.alias = "測試,\"VPN\"\n介面";
+        nic.description = "測試 VPN"; nic.up = true;
+        nic.receiveLink = 1000000000; nic.transmitLink = 100000000;
+        nic.mac = "00:11:22:33:44:55";
+        nic.index = 876; nic.operStatus = 1; nic.adminStatus = 1;
+        w.savedAdapter = "{vpn-test}";
+        w.updateAdapterList({nic});
+        check(w.selection().scope == traffic::Scope::Single, "virtual adapter individually selected");
+        const auto t = std::chrono::steady_clock::now();
+        auto sample = [&](int ms, std::uint64_t down, std::uint64_t up) {
+            nic.inOctets = down; nic.outOctets = up;
+            w.processSample({nic}, true, t + std::chrono::milliseconds(ms));
+        };
+        sample(0, 1000000000, 2000000000);
+        check(!w.sampleValid && w.records.empty(), "first sample only establishes baseline");
+        sample(500, 1000000500, 2000000100);
+        sample(1500, 1000002500, 2000000500);
+        check(w.session.down == 2500 && w.session.up == 500 && w.session.seconds == 1.5,
+              "byte totals and time-weighted average duration");
+        check(std::abs(w.session.averageDown() - 2500 * 8.0 / 1.5) < 1e-6 && w.session.peakDown == 16000,
+              "weighted average and instantaneous peak");
+        check(w.records.size() == 2 && w.records.back().session.down == 2500,
+              "CSV records hold exact session snapshots");
+        check(w.downloadValue->toolTip().contains(QStringLiteral("平均"))
+              && w.miniValue->toolTip() == w.downloadValue->toolTip(), "hover statistics synced to mini");
+        const QString frozen = w.downloadValue->text();
+        w.setPaused(true);
+        sample(2000, 9000000000, 9000000000);
+        check(w.records.size() == 2 && w.session.down == 2500 && w.downloadValue->text() == frozen
+              && !w.timer.isActive() && !w.hasPrevious, "pause freezes numbers and counters");
+        check(w.mini->windowTitle().contains(QStringLiteral("已暫停")), "mini pause status visible");
+        w.setPaused(false); // real baseline read must also be discarded before simulated sequence
+        w.timer.stop(); w.hasPrevious = false;
+        sample(2500, 9000000000, 9000000000);
+        sample(3000, 9000000100, 9000000050);
+        check(w.session.down == 2600 && w.records.size() == 3, "resume excludes pause traffic");
+        const auto count = w.records.size();
+        w.processSample({}, true, t + std::chrono::milliseconds(3500));
+        check(w.adapterSelector->currentData().toString() == "{vpn-test}" && !w.sampleValid,
+              "adapter unplug keeps selection and marks unavailable");
+        sample(4000, 19000000000, 19000000000);
+        check(w.records.size() == count && w.session.down == 2600, "reconnect baseline prevents spike");
+        sample(4500, 19000000200, 19000000100);
+        check(w.session.down == 2800, "reconnect subsequent delta counted");
+        w.processSample({}, false, t + std::chrono::milliseconds(5000), "test read failure");
+        sample(5500, 29000000000, 29000000000);
+        check(w.session.down == 2800 && !w.sampleValid, "read failure recovery discards missing interval");
+        sample(6000, 29000000300, 29000000200);
+        sample(10000, 39000000000, 39000000000);
+        check(w.session.down == 3100 && !w.sampleValid, "sleep gap excluded and unavailable");
+        sample(10500, 39000000100, 39000000050);
+        sample(11000, 10, 20);
+        check(w.session.down == 3200 && !w.sampleValid, "counter reset excludes invalid delta");
+        sample(11500, 110, 70);
+        check(w.session.down == 3300 && w.session.peakDown == 16000, "counter reset re-baselines next interval");
+        check(w.adapterDetails(w.lastInfos, {}).contains(QStringLiteral("00:11:22:33:44:55"))
+              && w.adapterDetails(w.lastInfos, {}).contains(QStringLiteral("1.00 Gbps")), "adapter MAC and link details");
+        QString error;
+        const QString csv = captureDir.isEmpty() ? QDir::currentPath() + "/v12-test.csv" : captureDir + "/v12-test.csv";
+        check(writeCsv(csv, w.records, error), "CSV atomic write");
+        QFile file(csv); check(file.open(QIODevice::ReadOnly), "CSV read back");
+        const QByteArray bytes = file.readAll(); file.close();
+        check(bytes.startsWith(QByteArray::fromHex("efbbbf")) && bytes.contains("Download_Bps"), "CSV UTF-8 BOM and fixed header");
+        check(bytes.contains(QStringLiteral("測試").toUtf8()) && bytes.contains("\"\"VPN\"\""), "CSV unicode and quotes escaped");
+        check(csvText("=1+1") == QStringLiteral("\"'=1+1\"") && csvText("  @SUM(1)").contains(QChar(0x27)),
+              "CSV formula-like names neutralized");
+        check(!writeCsv(csv + "/missing.csv", w.records, error), "CSV path failure reported");
+        QFile unchanged(csv); check(unchanged.open(QIODevice::ReadOnly), "read existing CSV after failure");
+        check(unchanged.readAll() == bytes, "failed export preserves existing file"); unchanged.close();
+        // Clean up only the temporary fixture when no caller requested capture artifacts.
+        if (captureDir.isEmpty()) QFile::remove(csv);
+        if (!captureDir.isEmpty()) {
+            w.resize(850, 760); w.show(); w.mini->show(); QTest::qWait(50);
+            w.grab().save(captureDir + "/v1.2-main.png");
+            w.mini->grab().save(captureDir + "/v1.2-mini.png");
+            w.resize(w.minimumSize()); QTest::qWait(50);
+            w.grab().save(captureDir + "/v1.2-minimum.png");
+        }
+        w.adapterSelector->setCurrentIndex(0);
+        const auto baselineInfos = w.lastInfos;
+        QTimer::singleShot(100, &w, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            check(dialog != nullptr, "adapter info opens native dialog");
+            if (dialog) {
+                auto *text = dialog->findChild<QPlainTextEdit *>();
+                check(text && text->isReadOnly() && !text->toPlainText().isEmpty(), "adapter info readable and copyable");
+                check(text && text->toPlainText().contains(QStringLiteral("MAC："))
+                      && text->toPlainText().contains(QStringLiteral("IP：")), "live adapter IP and MAC details displayed");
+                if (!captureDir.isEmpty()) dialog->grab().save(captureDir + "/v1.2-info.png");
+                dialog->accept();
+            }
+        });
+        w.showAdapterInfo();
+        check(w.lastInfos.size() == baselineInfos.size() && w.lastInfos.front().inOctets == baselineInfos.front().inOctets,
+              "viewing adapter info does not alter sampling counters");
+        w.setPaused(true);
+        w.clearStatistics();
+        check(w.session.down == 0 && w.session.up == 0 && w.session.seconds == 0
+              && w.session.peakDown == 0 && w.session.peakUp == 0 && w.session.averageDown() == 0
+              && w.records.empty() && w.chart->downloads.empty() && !w.hasPrevious && w.paused,
+              "reset during pause clears all stats history and CSV but keeps paused state");
+        w.setPaused(false); w.timer.stop();
+        w.adapterSelector->setCurrentIndex(0);
+        w.mini->hide();
+    }
+
     static bool nativeVisible(QWidget *widget) {
         const auto hwnd = reinterpret_cast<HWND>(widget->winId());
         return IsWindowVisible(hwnd) && !IsIconic(hwnd);
@@ -230,7 +341,7 @@ struct Verification {
         }
         window.session.down = 123;
         for (auto *button : window.findChildren<QPushButton *>())
-            if (button->text() == QStringLiteral("重設本次累積流量")) button->click();
+            if (button->text() == QStringLiteral("清空本次統計")) button->click();
         check(window.session.down == 0 && !window.hasPrevious, "manual reset clears totals and baseline");
         window.mini->show();
         if (!captureDir.isEmpty()) {
@@ -239,6 +350,7 @@ struct Verification {
             window.mini->grab().save(captureDir + "/v1.1-mini.png");
         }
         window.mini->hide();
+        verifyV12(window, captureDir);
         window.session.down = 100;
         // 網卡選單：第一項是所有實體網卡、最後一項是全部介面；切換網卡會清空歷史並記住選擇
         check(window.adapterSelector->count() >= 2, "adapter selector populated");
@@ -263,10 +375,12 @@ struct Verification {
         window.updateAdapterList({fake});
         window.chart->append(123, 456);
         window.updateAdapterList({});
-        check(window.chart->downloads.isEmpty(), "automatic fallback clears history");
+        check(window.adapterSelector->currentData().toString() == "{test}" && window.chart->downloads.size() == 1,
+              "missing selected adapter retained without fallback or clearing session");
         window.chart->append(123, 456);
         window.updateAdapterList({fake});
-        check(window.chart->downloads.isEmpty(), "automatic restore clears history");
+        check(window.adapterSelector->currentData().toString() == "{test}" && window.chart->downloads.size() == 2,
+              "returning adapter retains selection and history");
         window.sampleValid = false;
         window.refreshDisplay();
         check(window.downloadValue->text() == QStringLiteral("—"), "invalid sample hides stale speed");

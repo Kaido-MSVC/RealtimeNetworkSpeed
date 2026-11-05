@@ -1,4 +1,4 @@
-﻿即時網路速度（RealtimeNetworkSpeed）— 授權與第三方元件說明
+即時網路速度（RealtimeNetworkSpeed）— 授權與第三方元件說明
 License and third-party notices
 
 本程式使用了下列開放原始碼元件。各元件的授權全文放在本資料夾（licenses）中。
@@ -20,21 +20,21 @@ Qt and the other components below remain under their own licenses.
 一、Qt 6.12.0（LGPL-3.0-only）
 ------------------------------------------------------------------------------
 本程式使用 Qt 官方發行的 Qt 6.12.0（MSVC 2022 64-bit，未經修改）的 Qt Core、Qt GUI、
-Qt Widgets 模組，以及 Windows 平台、Windows 樣式、ICO 圖片外掛。
+Qt Widgets、Qt Network（僅本機網卡 IP 資訊）模組，以及 Windows 平台、Windows 樣式、ICO 圖片外掛。
 Qt 是 The Qt Company Ltd. 及其他貢獻者的著作，本程式依 GNU Lesser General Public License
 第 3 版（LGPL-3.0-only）使用 Qt。
 
 This program uses the official, unmodified Qt 6.12.0 binaries (MSVC 2022 64-bit):
-Qt Core, Qt GUI, Qt Widgets and the Windows platform, Windows style and ICO image
+Qt Core, Qt GUI, Qt Widgets, Qt Network (local interface information only) and the Windows platform, Windows style and ICO image
 plugins, under the GNU Lesser General Public License version 3 (LGPL-3.0-only).
 Qt is Copyright (C) The Qt Company Ltd. and other contributors.
 
 - 授權全文：Qt\LGPL-3.0-only.txt；LGPLv3 以 GPLv3 為基礎，GPLv3 全文見 Qt\GPL-3.0-only.txt。
 - Qt 內含的第三方程式碼（zlib、PCRE2、libpng、FreeType、HarfBuzz、double-conversion、
-  md4c、Unicode 資料等共 42 項）的著作權聲明與授權全文：Qt\Qt第三方元件.txt。
+  md4c、Unicode 資料等元件）的著作權聲明與授權全文：Qt\Qt第三方元件.txt。
   Copyright notices and licenses of third-party code inside Qt: Qt\Qt第三方元件.txt.
 - 替換 Qt / Replacing Qt：Qt 以獨立 DLL 動態連結
-  （Qt6Core.dll、Qt6Gui.dll、Qt6Widgets.dll 與 platforms、styles、imageformats 資料夾中的外掛）。
+  （Qt6Core.dll、Qt6Gui.dll、Qt6Widgets.dll、Qt6Network.dll 與 platforms、styles、imageformats 資料夾中的外掛）。
   你可以把它們換成自己修改或重新編譯的相容版本（Qt 6.12.x、MSVC x64），程式會載入替換後的 DLL。
   Qt is dynamically linked; you may replace these DLLs with your own modified,
   compatible build (Qt 6.12.x, MSVC x64) and the program will use them.

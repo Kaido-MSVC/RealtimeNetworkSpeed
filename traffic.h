@@ -20,6 +20,11 @@ struct InterfaceInfo {
     bool filter = false;        // NDIS 篩選驅動介面（與實體網卡計數重複）
     bool hardware = false;      // 實體網卡
     bool up = false;
+    unsigned index = 0;
+    unsigned operStatus = 0;
+    unsigned adminStatus = 0;
+    std::uint64_t receiveLink = 0, transmitLink = 0;
+    std::string mac;
     std::uint64_t inOctets = 0;
     std::uint64_t outOctets = 0;
 };
@@ -31,10 +36,10 @@ struct Selection {
     std::string guid;           // 只在 Scope::Single 使用
 };
 
-// 可以出現在「網卡」選單中的介面：實體網卡本體（不含篩選介面）。
+// 可選擇實體、VPN 與虛擬介面，排除 loopback 和重複的篩選介面。
 inline bool isSelectableAdapter(const InterfaceInfo &i)
 {
-    return !i.loopback && !i.filter && i.hardware;
+    return !i.loopback && !i.filter;
 }
 
 // 這個介面是否計入目前選擇的統計。
@@ -67,6 +72,7 @@ inline std::vector<Counter> selectCounters(const std::vector<InterfaceInfo> &inf
 
 struct Rates {
     std::uint64_t inBytes = 0, outBytes = 0;
+    double seconds = 0;         // 有共同有效計數器的取樣時間
     double down = 0;            // bit/s
     double up = 0;              // bit/s
 };
@@ -84,8 +90,10 @@ inline Rates computeRates(const std::vector<Counter> &previous, const std::vecto
                                      [&](const Counter &p) { return p.luid == c.luid; });
         if (it == previous.end())
             continue;
-        if (c.in >= it->in) inBytes += (c.in - it->in);
-        if (c.out >= it->out) outBytes += (c.out - it->out);
+        if (c.in < it->in || c.out < it->out) continue;
+        r.seconds = seconds;
+        inBytes += (c.in - it->in);
+        outBytes += (c.out - it->out);
     }
     r.down = inBytes * 8.0 / seconds;
     r.up = outBytes * 8.0 / seconds;
@@ -94,7 +102,13 @@ inline Rates computeRates(const std::vector<Counter> &previous, const std::vecto
 
 struct Session {
     std::uint64_t down = 0, up = 0;
+    double seconds = 0, peakDown = 0, peakUp = 0;
+    double averageDown() const { return seconds > 0 ? down * 8.0 / seconds : 0; }
+    double averageUp() const { return seconds > 0 ? up * 8.0 / seconds : 0; }
     void add(const Rates &r) {
+        seconds += r.seconds;
+        peakDown = std::max(peakDown, r.down);
+        peakUp = std::max(peakUp, r.up);
         const auto max = std::numeric_limits<std::uint64_t>::max();
         down += std::min(r.inBytes, max - down);
         up += std::min(r.outBytes, max - up);

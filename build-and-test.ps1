@@ -75,10 +75,10 @@ try {
     if (-not (Test-Path (Join-Path $dist 'vcruntime140.dll'))) { throw '打包缺少 MSVC 執行階段 DLL（vcruntime140.dll）' }
     Log "dist 內的執行階段：$((Get-ChildItem $dist -Filter '*140*.dll' | ForEach-Object Name) -join ', ')"
 
-    # 只保留程式用得到的 Qt 元件（程式只用 Core／Gui／Widgets；圖示只需要 ICO 外掛）
+    # 只保留程式用得到的 Qt 元件（程式使用 Core／Gui／Widgets／Network（本機介面資訊）；圖示只需要 ICO 外掛）
     # Qt6Pdf（含 PDFium）、Qt6Svg、iconengines 由 windeployqt 依外掛連帶帶入；
     # opengl32sw.dll（Mesa）、D3Dcompiler_47.dll 是 OpenGL／D3D 備援，Widgets 軟體繪圖用不到
-    foreach ($unused in @('Qt6Network.dll', 'tls', 'networkinformation', 'generic', 'Qt6Pdf.dll', 'Qt6Svg.dll',
+    foreach ($unused in @('tls', 'networkinformation', 'generic', 'Qt6Pdf.dll', 'Qt6Svg.dll',
                           'iconengines', 'opengl32sw.dll', 'D3Dcompiler_47.dll')) {
         $path = Join-Path $dist $unused
         if (Test-Path $path) { Remove-Item $path -Recurse -Force; Log "移除未使用：$unused" }

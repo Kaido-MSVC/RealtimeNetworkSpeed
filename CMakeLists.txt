@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Widgets Network)
 
 qt_add_executable(RealtimeNetworkSpeed WIN32
     main.cpp
@@ -18,7 +18,7 @@ qt_add_executable(RealtimeNetworkSpeed WIN32
 # rc.exe 從建置目錄執行，需要在那裡找得到 app.ico
 configure_file(app.ico app.ico COPYONLY)
 
-target_link_libraries(RealtimeNetworkSpeed PRIVATE Qt6::Widgets iphlpapi)
+target_link_libraries(RealtimeNetworkSpeed PRIVATE Qt6::Widgets Qt6::Network iphlpapi)
 if(MSVC)
     target_compile_options(RealtimeNetworkSpeed PRIVATE /utf-8)
 endif()
@@ -27,7 +27,7 @@ option(BUILD_VERIFICATION "Build unit and UI verification" OFF)
 if(BUILD_VERIFICATION)
     find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Test)
     add_executable(RealtimeNetworkSpeedVerification tests/verification.cpp app_resources.qrc)
-    target_link_libraries(RealtimeNetworkSpeedVerification PRIVATE Qt6::Widgets Qt6::Test iphlpapi)
+    target_link_libraries(RealtimeNetworkSpeedVerification PRIVATE Qt6::Widgets Qt6::Network Qt6::Test iphlpapi)
     if(MSVC)
         target_compile_options(RealtimeNetworkSpeedVerification PRIVATE /utf-8)
     endif()
