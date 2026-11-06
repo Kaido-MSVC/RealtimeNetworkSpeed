@@ -1,10 +1,25 @@
 # 即時網路速度（RealtimeNetworkSpeed）
 
+
+**v1.3.0 新增 F10**：「清除歷史流量…」可按網卡／監控範圍及近 7／30 天、自訂日期或全部日期刪除。可先匯出 CSV，確認預設取消；與「清空本次統計」分開，清除後新的有效取樣繼續累積。已通過使用者本機驗收。
 Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++17／Qt 6 Widgets，透過 Windows `GetIfTable2`（iphlpapi）讀取網卡計數器，圖表以 QPainter 繪製，不依賴 Qt Charts。
 
 作者：**Kaido-MSVC**。本程式完全在本機執行，不連網、不上傳任何資料。
 
-最新公開版本：**v1.2.1**。本機修正已由使用者親自驗收。
+最新版本：**v1.3.0**（2026-11-06）。[正式下載與全部附件](https://github.com/Kaido-MSVC/RealtimeNetworkSpeed/releases/tag/v1.3.0)。
+
+### v1.3.0 全部功能版
+- 依監控範圍分開統計今日、本月與每日有效流量；「歷史流量」提供 7／30 天圖及 7／30 天／全部保留歷史 CSV。
+- 每日彙總以 JSON 自動保存於既有 INI 同目錄的 `traffic-history.json`，約每 60 秒及正常退出保存；QSaveFile 原子替換、有效備份與損壞檔保留。資料只代表程式有效監控期間，並非帳單用量；異常退出可能失去尚未保存的約 60 秒資料。
+- 保留最多 365 個日曆日；跨日取樣依時間分配，時鐘跳動重新建立取樣基準。bytes 以字串保存精度。切換範圍或清空本次統計不刪除歷史。
+- 即時曲線可選 60 秒、5 分鐘、30 分鐘，固定記憶體上限，空檔保持斷線，暫停時凍結。
+- 可自行啟用 HKCU 登入啟動，預設關閉；登入時縮至系統匣。移動程式後須取消並重新勾選以更新路徑。
+- 網卡斷線／恢復及讀取失敗通知預設關閉，三次連續確認後提示，穩定狀態不重複。
+- 迷你視窗可調 50–100% 透明度、小／中／大字體及網卡／本次流量顯示，設定隨既有 INI 保存。
+- 保留 Qt 6.12.0／C++17／MSVC x64、Qt Network、.pro、既有授權及歷史封裝；不增加資料庫、服務、雲端或其他框架。
+
+實作、資料格式、時間規則與測試限制見 [DEVELOPMENT-v1.3.0.md](DEVELOPMENT-v1.3.0.md)。使用者已親自驗收 F01～F10；正式建置與封裝紀錄見 [RELEASE-v1.3.0.md](RELEASE-v1.3.0.md)，版本摘要見 [CHANGELOG.md](CHANGELOG.md)。v1.3.x 以錯誤、安全及必要相容性修正為主。
+
 
 ### v1.2.1 穩定性與操作修正
 - 主內容可捲動，小螢幕／高 DPI 下底部「暫停、清空、匯出」固定可見；較窄視窗可水平捲動內容。
@@ -53,8 +68,8 @@ CSV 新增欄位：`Retained_From,Retained_To,Retention_Hours,Retention_Max_Reco
 
 | 附件 | 內容 |
 | --- | --- |
-| `RealtimeNetworkSpeed-1.2.1-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
-| `RealtimeNetworkSpeed-1.2.1-source.zip` | 本程式原始碼，內容與 `v1.2.1` Tag 相同 |
+| `RealtimeNetworkSpeed-1.3.0-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
+| `RealtimeNetworkSpeed-1.3.0-source.zip` | 本程式原始碼，內容與 `v1.3.0` Tag 相同 |
 | `qtbase-everywhere-src-6.12.0.tar.xz` | 隨附 Qt DLL 的完整對應原始碼（Qt 官方原始碼包，未修改） |
 | `SHA256SUMS.txt` | 上述附件的 SHA-256 |
 
@@ -65,7 +80,7 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 - **實際測試結果**：只在 Windows 11 Home x64（26200）測試過，包含建置、兩組自動測試，以及只含 Windows 系統資料夾的 PATH 下的啟動檢查。沒有在 Windows 10 實機或虛擬機測試。
 
 ## 功能
-- 每 0.5 秒更新下載、上傳速度，圖表依實際時間顯示最近 60 秒，最多保留 120 筆；超過 2 秒的取樣間隔以斷線呈現。
+- 每 0.5 秒更新下載、上傳速度，圖表依實際時間可選最近 60 秒／5 分鐘／30 分鐘，短緩衝最多 120 筆、長緩衝最多 3600 筆；超過 2 秒的取樣間隔以斷線呈現。
 - **網卡選擇**：「所有實體網卡」（預設）、個別實體／VPN／虛擬網卡，或「全部介面（含 VPN／虛擬網卡）」。選擇會記住；手動切換範圍時經確認或先匯出後清空本次統計與紀錄；拔插保留指定網卡，重連後重新建立基準。
 - **顯示單位**：自動、Kbps、Mbps、Gbps、KB/s、MB/s。自動模式依目前速度與 60 秒峰值，在 Kbps／Mbps／Gbps 之間選擇共同單位。
 - 採十進位：1 Kbps = 1000 bit/s；1 KB/s = 8 Kbps；1 MB/s = 8 Mbps。
@@ -94,6 +109,7 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 | 路徑 | 內容 |
 | --- | --- |
 | `main.cpp` | 視窗、圖表、Windows 網卡讀取 |
+| `history.h` | 每日流量、JSON 原子保存／復原、篩選清除及歷史 CSV |
 | `traffic.h` | 流量計算、介面篩選、縱軸刻度的純邏輯（不依賴 Qt／Windows） |
 | `tests/traffic_tests.cpp` | `traffic.h` 單元測試 |
 | `tests/verification.cpp` | 單位、介面、偏好、圖表的 Qt 驗證 |

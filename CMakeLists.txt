@@ -11,6 +11,7 @@ find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Widgets Network)
 qt_add_executable(RealtimeNetworkSpeed WIN32
     main.cpp
     traffic.h
+    history.h
     app.rc
     app_resources.qrc
 )

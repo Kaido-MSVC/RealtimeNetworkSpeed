@@ -15,6 +15,330 @@ static void check(bool condition, const char *message) {
 }
 
 struct Verification {
+    static int miniRestored() {
+        SpeedWindow window; window.timer.stop();
+        check(window.mini->windowOpacity()>=.49 && window.mini->windowOpacity()<=.51
+            && window.miniValue->font().pointSize()==15 && window.miniValue->text().contains(QStringLiteral("本次")),
+            "mini settings survive process restart");
+        return failures?1:0;
+    }
+    static int f10NormalExit(QApplication &app,const QString &directory) {
+        SpeedWindow w; w.timer.stop(); w.retentionTimer.stop();
+        w.historyStore=history::Store(QDir(directory).filePath("normal-exit.json"));
+        const auto today=QDate::currentDate(); w.historyStore.load(today);
+        w.historyStore.addPart(today,"physical","實體",900,400,1);
+        QString error,notice; int removed;
+        if(!w.historyStore.save(error) || !w.historyStore.erase({"",{},{}},removed,error,notice)) return 2;
+        w.historyStore.addPart(today,"physical","實體",19,7,.5);
+        QTimer::singleShot(0,&app,&QCoreApplication::quit);
+        return app.exec();
+    }
+    static QByteArray bytes(const QString &path) {
+        QFile f(path); return f.open(QIODevice::ReadOnly)?f.readAll():QByteArray();
+    }
+    static void verifyF10(const QString &captures) {
+        QTemporaryDir dir;
+        const QDate today=QDate::currentDate();
+        const QString path=dir.filePath("delete.json");
+        history::Store store(path); store.load(today);
+        for(int i=0;i<40;++i) for(const QString &scope:{QString("physical"),QString("all"),QString("{nic-a}")})
+            store.addPart(today.addDays(-i),scope,scope,100+i,200+i,.5);
+        QString error,notice; int removed=-1;
+        check(store.save(error),"F10 seed primary and backup");
+        const auto initial=store.encode();
+        history::Filter seven{"physical",today.addDays(-6),today};
+        check(store.matching(seven)==7 && store.csvData(seven).count('\n')==8,"F10 inclusive seven-day export matches deletion preview");
+        check(store.erase(seven,removed,error,notice) && removed==7 && notice.isEmpty(),"F10 delete inclusive seven days in one scope");
+        QMap<QString,history::Day> expected; QDate high;
+        check(history::Store::decode(initial,expected,high),"F10 decode expected source");
+        for(auto it=expected.begin();it!=expected.end();) if(seven.matches(it.value())) it=expected.erase(it); else ++it;
+        history::Store expectedStore; expectedStore.days=expected; expectedStore.newest=high;
+        check(store.encode()==expectedStore.encode(),"F10 every unselected row and high-water date preserved exactly");
+        check(bytes(path)==store.encode() && bytes(path+".bak")==store.encode() && !store.dirty,"F10 commit primary memory backup agree");
+        check(store.save(error) && bytes(path)==store.encode(),"F10 later periodic save cannot resurrect old data");
+        history::Store restarted(path); restarted.load(today);
+        check(restarted.encode()==store.encode(),"F10 reload preserves deletion");
+        check(history::Store::atomic(path,"{corrupt",error),"F10 corrupt main after deletion fixture");
+        restarted.load(today);
+        check(restarted.matching(seven)==0 && restarted.encode()==store.encode(),"F10 backup recovery cannot resurrect deleted history");
+        check(restarted.save(error),"F10 recovery save remains deleted");
+        store=restarted;
+        // Unsaved data is part of the transaction and must survive outside its filter.
+        store.addPart(today,"all","all",77,33,.5);
+        const auto beforeFailure=store.encode(); const auto diskBefore=bytes(path),backupBefore=bytes(path+".bak");
+        history::Filter thirty{"{nic-a}",today.addDays(-29),today};
+        HANDLE locked=CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        check(locked!=INVALID_HANDLE_VALUE,"F10 lock primary against atomic replacement");
+        if(locked!=INVALID_HANDLE_VALUE) {
+            check(!store.erase(thirty,removed,error,notice) && removed==0 && store.dirty
+                  && store.encode()==beforeFailure && bytes(path)==diskBefore && bytes(path+".bak")==backupBefore,
+                  "F10 main commit failure preserves unsaved memory primary and restores backup");
+            CloseHandle(locked);
+        }
+        locked=CreateFileW(reinterpret_cast<LPCWSTR>((path+".bak").utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        check(locked!=INVALID_HANDLE_VALUE,"F10 lock backup against invalidation");
+        if(locked!=INVALID_HANDLE_VALUE) {
+            check(!store.erase(thirty,removed,error,notice) && store.encode()==beforeFailure
+                  && bytes(path)==diskBefore && bytes(path+".bak")==backupBefore,"F10 locked backup aborts before modifying primary or memory");
+            CloseHandle(locked);
+        }
+        check(!store.erase({"all",today,today.addDays(-1)},removed,error,notice) && store.encode()==beforeFailure,"F10 inverted range rejected");
+        check(!store.erase({"all",QDate(),today},removed,error,notice) && store.encode()==beforeFailure,"F10 partial date filter rejected");
+        check(store.erase({"missing",{},{}},removed,error,notice) && removed==0 && bytes(path)==diskBefore && store.dirty,"F10 empty match is a no-op preserving dirty data");
+        store.writable=false;
+        check(!store.erase(thirty,removed,error,notice) && store.encode()==beforeFailure,"F10 disabled history writes reject deletion"); store.writable=true;
+        check(store.erase(thirty,removed,error,notice) && removed==30 && store.matching({"all",today,today})==1,
+              "F10 thirty days inclusive keeps other scope and unsaved data");
+        check(store.totals("all",today,today).down==177,"F10 unrelated unsaved totals committed exactly");
+        check(store.erase({"",today.addDays(-35),today.addDays(-33)},removed,error,notice) && removed==9,"F10 custom cross-scope range deletes only three dates");
+        check(store.erase({"all",{},{}},removed,error,notice) && removed==37,"F10 all dates for selected scope");
+        check(store.erase({"",{},{}},removed,error,notice) && store.days.isEmpty() && store.newest==today,"F10 clear all histories keeps retention high-water");
+        traffic::Rates r; r.inBytes=91; r.outBytes=17; r.seconds=.5;
+        QDateTime wall(today,QTime(12,0),QTimeZone::systemTimeZone());
+        store.add("physical","實體",r,wall,wall.addMSecs(500));
+        check(store.totals("physical",today,today).down==91 && store.save(error),"F10 valid sampling resumes after deleting today");
+        restarted.load(today); check(restarted.totals("physical",today,today).down==91,"F10 resumed samples persist without old totals");
+
+        // Real modal controls, independent of the earlier verification window.
+        const QString uiPath=dir.filePath("ui.json");
+        {
+            SpeedWindow w; w.timer.stop(); w.retentionTimer.stop(); w.setPaused(false);
+            w.historyStore=history::Store(uiPath); w.historyStore.load(today);
+            w.historyStore.addPart(today,"physical","所有實體網卡",9000000,3000000,1);
+            w.historyStore.addPart(today.addDays(-10),"physical","所有實體網卡",20,10,1);
+            w.historyStore.addPart(today,"{other}","其他網卡",30,10,1);
+            check(w.historyStore.save(error),"F10 UI seed history");
+            w.refreshDisplay(); w.resize(850,760); SpeedWindow::ensureVisible(&w); w.show();
+            auto settings=displaySettings(); settings.sync(); const auto settingsBefore=bytes(settings.fileName());
+            const auto session=w.session; const auto chart=w.chart->downloads; const auto records=w.records.size();
+            const auto previous=w.previousTime; const bool baseline=w.hasPrevious;
+            const auto oldJson=w.historyStore.encode(), oldDisk=bytes(uiPath),oldBackup=bytes(uiPath+".bak");
+            auto *button=w.findChild<QPushButton *>("clearHistoryButton");
+            check(button && button->text()!=w.findChild<QPushButton *>("resetButton")->text(),"F10 separate history and session actions");
+            auto exercise=[&](bool accept,bool fail,bool all) {
+                int stage=0; bool sawConfirm=false,sawResult=false;
+                QTimer driver; driver.setInterval(20);
+                QTimer watchdog; watchdog.setSingleShot(true);
+                QObject::connect(&watchdog,&QTimer::timeout,&w,[&]{ check(false,"F10 modal test timeout"); driver.stop(); for(auto *widget:QApplication::topLevelWidgets()) if(auto *d=qobject_cast<QDialog *>(widget)) d->reject(); });
+                QObject::connect(&driver,&QTimer::timeout,&w,[&] {
+                    auto *modal=QApplication::activeModalWidget(); if(!modal) return;
+                    if(modal->objectName()=="clearHistoryDialog") {
+                        auto *d=qobject_cast<QDialog *>(modal);
+                        if(stage==0) {
+                            auto *scope=d->findChild<QComboBox *>("clearHistoryScope"); auto *range=d->findChild<QComboBox *>("clearHistoryRange");
+                            check(d->findChild<QPushButton *>("clearHistoryCancel")->isDefault(),"F10 editor defaults to cancel");
+                            scope->setCurrentIndex(scope->findData(all?QString():QString("physical")));
+                            range->setCurrentIndex(2);
+                            d->findChild<QDateEdit *>("clearHistoryFirst")->setDate(today);
+                            d->findChild<QDateEdit *>("clearHistoryLast")->setDate(today.addDays(-1));
+                            check(!d->findChild<QPushButton *>("clearHistoryApply")->isEnabled(),"F10 invalid date range disables delete");
+                            d->findChild<QDateEdit *>("clearHistoryLast")->setDate(today);
+                            if(all) range->setCurrentIndex(3);
+                            check(d->findChild<QPushButton *>("clearHistoryExport")->isEnabled(),"F10 CSV available before deletion");
+                            if(!captures.isEmpty() && !accept) d->grab().save(captures+"/f10-clear-range.png");
+                            stage=1; QTimer::singleShot(0,d->findChild<QPushButton *>("clearHistoryApply"),&QPushButton::click);
+                        } else if(stage>=2) { stage=4; driver.stop(); d->reject(); }
+                    } else if(auto *box=qobject_cast<QMessageBox *>(modal)) {
+                        if(stage==1 && box->objectName()=="clearHistoryConfirm") {
+                            sawConfirm=true;
+                            check(box->defaultButton()==box->button(QMessageBox::Cancel)
+                                && box->escapeButton()==box->button(QMessageBox::Cancel)
+                                && box->text().contains(QStringLiteral("不可復原")) && box->text().contains("CSV")
+                                && box->text().contains(all?QStringLiteral("全部保留日期"):today.toString(Qt::ISODate)),"F10 concrete irreversible confirmation defaults and escapes to cancel");
+                            if(!captures.isEmpty() && !accept) box->grab().save(captures+"/f10-confirm.png");
+                            stage=2; box->button(accept?QMessageBox::Yes:QMessageBox::Cancel)->click();
+                        } else if(stage==2) {
+                            sawResult=true; check(box->windowTitle()==(fail?QStringLiteral("清除失敗"):QStringLiteral("清除完成")),"F10 UI reports actual persistence outcome");
+                            stage=3; box->accept();
+                        }
+                    }
+                });
+                watchdog.start(10000); driver.start(); button->click(); driver.stop(); watchdog.stop();
+                check(sawConfirm && (accept==sawResult) && stage==4,"F10 modal flow completed");
+            };
+            exercise(false,false,false);
+            check(w.historyStore.encode()==oldJson && bytes(uiPath)==oldDisk && bytes(uiPath+".bak")==oldBackup,"F10 cancel preserves JSON memory and backup");
+            HANDLE uiLock=CreateFileW(reinterpret_cast<LPCWSTR>(uiPath.utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+            check(uiLock!=INVALID_HANDLE_VALUE,"F10 UI persistence failure fixture");
+            if(uiLock!=INVALID_HANDLE_VALUE) { exercise(true,true,false); CloseHandle(uiLock); }
+            check(w.historyStore.encode()==oldJson && bytes(uiPath)==oldDisk,"F10 UI persistence failure leaves original data");
+            exercise(true,false,false);
+            check(w.historyStore.matching({"physical",today,today})==0 && w.historyStore.days.size()==2,"F10 UI selected date and scope deleted only matching row");
+            check(w.historySummary->text().contains(QStringLiteral("今日 ↓ 0.000 MB")) && w.historySummary->text().contains(QStringLiteral("本月 ↓ 0.000 MB")),"F10 today and month summary refresh immediately");
+            check(w.session.down==session.down && w.session.up==session.up && w.session.seconds==session.seconds
+                  && w.chart->downloads==chart && w.records.size()==records && w.previousTime==previous && w.hasPrevious==baseline
+                  && !w.paused && !w.timer.isActive(),"F10 clear leaves session realtime chart CSV sampling baseline and pause state intact");
+            settings.sync(); check(bytes(settings.fileName())==settingsBefore,"F10 clearing writes no QSettings");
+            // Drive an actual subsequent valid sample after deleting today's row.
+            w.clearStatistics(); // Establish deterministic baseline before sampling.
+            traffic::InterfaceInfo nic; nic.luid=987; nic.guid="{f10}"; nic.description="F10"; nic.up=true; nic.hardware=true;
+            nic.inOctets=100; nic.outOctets=10;
+            const auto t=std::chrono::steady_clock::now();
+            w.processSample({nic},true,t,{},wall);
+            nic.inOctets+=123; nic.outOctets+=45;
+            w.processSample({nic},true,t+std::chrono::milliseconds(500),{},wall.addMSecs(500));
+            check(w.historyStore.totals("physical",today,today).down==123 && w.session.down==123,"F10 real sampling resumes from current counters after today cleared");
+            check(QMetaObject::invokeMethod(&w.retentionTimer,"timeout",Qt::DirectConnection),"F10 trigger periodic autosave");
+            history::Store periodic(uiPath); periodic.load(today);
+            check(periodic.totals("physical",today,today).down==123 && periodic.days.size()==3,"F10 autosave persists only new samples plus untouched records");
+            exercise(true,false,true);
+            check(w.historyStore.days.isEmpty(),"F10 UI clear all scopes all dates");
+            w.historyStore.addPart(today,"physical","實體",8,4,.5);
+            w.timer.start(500);
+            int route=0; QTimer driver; driver.setInterval(20);
+            QTimer watchdog; watchdog.setSingleShot(true);
+            QObject::connect(&watchdog,&QTimer::timeout,&w,[&] { check(false,"F10 history route timeout"); driver.stop(); for(auto *widget:QApplication::topLevelWidgets()) if(auto *d=qobject_cast<QDialog *>(widget)) d->reject(); });
+            QObject::connect(&driver,&QTimer::timeout,&w,[&] {
+                auto *modal=QApplication::activeModalWidget(); if(!modal) return;
+                check(w.timer.isActive() && !w.paused,"F10 dialogs keep real monitoring timer running");
+                if(route==0) {
+                    auto *clear=modal->findChild<QPushButton *>("historyClearButton"); if(!clear) return;
+                    route=1; QTimer::singleShot(0,clear,&QPushButton::click);
+                } else if(route==1 && modal->objectName()=="clearHistoryDialog") {
+                    route=2; QTest::keyClick(modal,Qt::Key_Escape);
+                } else if(route==2) {
+                    check(modal->findChild<QWidget *>("historyPlot")!=nullptr,"F10 history chart remains open after cancelling clear");
+                    route=3; driver.stop(); qobject_cast<QDialog *>(modal)->accept();
+                }
+            });
+            watchdog.start(10000); driver.start(); w.showHistory(); driver.stop(); watchdog.stop(); w.timer.stop();
+            check(route==3,"F10 history-window clear entry and Escape cancellation");
+        }
+        history::Store afterExit(uiPath); afterExit.load(today);
+        check(afterExit.days.size()==1 && afterExit.totals("physical",today,today).down==8,"F10 normal window destruction saves only post-clear new data");
+        QProcess normalExit;
+        normalExit.start(QCoreApplication::applicationFilePath(),{"--f10-normal-exit",dir.path()});
+        check(normalExit.waitForFinished(10000) && normalExit.exitCode()==0,"F10 application normal quit child exits successfully");
+        history::Store childExit(dir.filePath("normal-exit.json")); childExit.load(today);
+        check(childExit.days.size()==1 && childExit.totals("physical",today,today).down==19,"F10 aboutToQuit persists only post-deletion samples");
+        std::cout << "F10: date/scope deletion, cancel, atomic failure, backup recovery, autosave, exit and resumed-sample checks completed\n";
+    }
+    static void verifyV13(SpeedWindow &w, const QString &captures) {
+        w.timer.stop(); w.retentionTimer.stop(); w.clearStatistics();
+        QTemporaryDir dir;
+        const QString path=dir.filePath("history.json");
+        history::Store store(path);
+        const QDate date(2025,12,31);
+        const QDateTime start(date,QTime(23,59,59,750),QTimeZone::UTC);
+        traffic::Rates r; r.inBytes=1001; r.outBytes=201; r.seconds=.5;
+        store.add("physical","實體",r,start,start.addMSecs(500));
+        check(store.days.size()==2 && store.totals("physical",date,date).down==500
+              && store.totals("physical",date.addDays(1),date.addDays(1)).down==501,"year midnight split conserves exact bytes");
+        auto jan=store.totals("physical",QDate(2026,1,1),QDate(2026,1,31));
+        check(jan.down==501 && jan.up==101 && jan.seconds==.25,"monthly and year rollover totals");
+        const QDateTime month(QDate(2026,1,31),QTime(23,59,59,500),QTimeZone::UTC);
+        r.seconds=1; r.inBytes=2000; r.outBytes=1000;
+        store.add("vpn","VPN",r,month,month.addSecs(1));
+        check(store.totals("vpn",QDate(2026,2,1),QDate(2026,2,1)).down==1000
+              && store.totals("physical",date,QDate(2026,2,1)).down==1001,"month rollover and scope isolation");
+        const auto before=store.encode();
+        store.add("vpn","VPN",r,month,month.addSecs(-10));
+        store.add("vpn","VPN",r,month,month.addSecs(3600));
+        check(store.encode()==before,"backward and forward clock jumps rejected without duplicate bytes");
+        QString error; check(store.save(error),"atomic initial save and backup");
+        history::Store loaded(path); loaded.load(QDate(2026,2,1));
+        check(loaded.encode()==store.encode() && !loaded.dirty,"restart loads exact daily aggregates without recounting");
+        QProcess crash;
+        const QString crashPath=dir.filePath("crash.json");
+        crash.start(QCoreApplication::applicationFilePath(),{"--history-crash",crashPath});
+        check(crash.waitForFinished(10000) && crash.exitCode()==0,"abnormal exit fixture reaches saved checkpoint");
+        history::Store checkpoint(crashPath); checkpoint.load();
+        const auto recoveredCheckpoint=checkpoint.totals("physical",QDate::currentDate(),QDate::currentDate());
+        check(recoveredCheckpoint.down==50,"abnormal exit restores only committed totals without duplicate unsaved bytes");
+        r.inBytes=9007199254740993ULL; r.outBytes=9007199254740995ULL;
+        store.add("=danger,\"scope\"","大數",r,month,month.addSecs(1));
+        check(store.save(error),"second save rotates last valid backup");
+        history::Store exact(path); exact.load(QDate(2026,2,1));
+        check(exact.totals("=danger,\"scope\"",QDate(2026,1,1),QDate(2026,2,1)).down==9007199254740993ULL,"JSON preserves integers beyond 2^53");
+        auto csv=exact.csvData("",0,QDate(2026,2,1));
+        check(csv.startsWith(QByteArray::fromHex("efbbbf")) && csv.contains("\"'=danger,\"\"scope\"\"\"")
+              && csv.contains("4503599627370496") && csv.contains("\r\n"),"history CSV BOM CRLF integer bytes and formula escaping");
+        auto only7=exact.csvData("physical",7,QDate(2026,2,1));
+        check(!only7.contains("2025-12-31") && !only7.contains("vpn"),"CSV selected dates and scope filter");
+        QFile f(path); check(f.open(QIODevice::WriteOnly),"open corrupt fixture"); f.write("{broken"); f.close();
+        history::Store recovered(path); recovered.load(QDate(2026,2,1));
+        check(recovered.days.size()==4 && !recovered.warning.isEmpty()
+              && QDir(dir.path()).entryList({"*.corrupt-*"},QDir::Files).size()==1,"corrupt main preserved and last valid backup recovered");
+        check(recovered.save(error),"recovered state can be safely saved");
+        QFile backup(path+".bak"); check(backup.open(QIODevice::WriteOnly),"open backup fixture"); backup.write("invalid"); backup.close();
+        check(f.open(QIODevice::WriteOnly),"reopen main fixture"); f.write("invalid"); f.close();
+        history::Store empty(path); empty.load(QDate(2026,2,1));
+        check(empty.days.empty() && !empty.warning.isEmpty()
+              && QDir(dir.path()).entryList({"*.corrupt-*"},QDir::Files).size()==3,"both damaged files preserved and startup recovers empty");
+        check(empty.save(error),"blank recovery state saves atomically");
+        history::Store retention(dir.filePath("retention.json"));
+        for(int i=0;i<400;++i) { auto a=month.addDays(i); retention.add("p","p",r,a,a.addSecs(1)); }
+        check(retention.days.size()==365,"history retention limited to 365 calendar days");
+        const auto original=retention.encode(); retention.path=dir.filePath("block/child.json");
+        QFile blocker(dir.filePath("block")); check(blocker.open(QIODevice::WriteOnly),"create write failure fixture"); blocker.close();
+        check(!retention.save(error) && retention.dirty && retention.encode()==original,"save failure retains in-memory totals for retry");
+        check(!history::Store::atomic(path+"/invalid",csv,error),"history CSV write failure reported");
+        check(history::csv("\t@formula").startsWith("\"'"),"history CSV control characters neutralized");
+        history::Notifications n;
+        check(n.observe(1)==-1 && n.observe(0)==-1 && n.observe(1)==-1,"notification initial baseline and transient disconnect silent");
+        check(n.observe(0)==-1 && n.observe(0)==-1 && n.observe(0)==0 && n.observe(0)==-1,"disconnect debounce and duplicate suppression");
+        check(n.observe(2)==-1 && n.observe(2)==-1 && n.observe(2)==2,"read failure notification once after debounce");
+        check(n.observe(1)==-1 && n.observe(1)==-1 && n.observe(1)==1,"recovery notification debounced");
+        n.reset(); check(n.observe(0)==-1,"pause and scope reset remain silent");
+        QSettings registry(QStringLiteral("HKEY_CURRENT_USER\\Software\\RealtimeNetworkSpeedTest-")+QUuid::createUuid().toString(QUuid::Id128),QSettings::NativeFormat);
+        const QString executable=QCoreApplication::applicationFilePath();
+        check(setStartup(registry,true,executable,error) && registry.value("RealtimeNetworkSpeed").toString()==startupCommand(executable),"HKCU startup quoted absolute executable and startup flag roundtrip");
+        check(setStartup(registry,false,executable,error) && !registry.contains("RealtimeNetworkSpeed"),"HKCU startup removable"); registry.clear(); registry.sync();
+        check(startupCommand("relative.exe").isEmpty() && startupCommand("D:/a\"b.exe").isEmpty()
+              && startupCommand("D:/含 空白/app.exe")==QStringLiteral("\"D:\\含 空白\\app.exe\" --startup"),"startup path rejects relative and quoted injection; handles spaces unicode");
+        check(!setStartup(registry,true,dir.filePath("missing.exe"),error),"missing startup executable rejected");
+        w.chart->clear(); const auto t=std::chrono::steady_clock::now();
+        for(int i=0;i<4000;++i) w.chart->append(i==3990?NAN:8000,1000,t+std::chrono::milliseconds(i*500));
+        check(w.chart->longSamples.size()==3600 && w.chart->downloads.size()==120,"all chart buffers bounded independently");
+        w.chart->setWindowSeconds(300); const auto five=w.chart->plotted();
+        check(five.size()<=152 && std::any_of(five.begin(),five.end(),[](auto p){return !std::isfinite(p.down);}),"five minute aggregation preserves gap");
+        w.chart->setWindowSeconds(1800); const auto thirty=w.chart->plotted();
+        check(thirty.size()<=182 && std::any_of(thirty.begin(),thirty.end(),[](auto p){return !std::isfinite(p.down);}),"thirty minute aggregation bounded and gap preserved");
+        const auto size=w.chart->longSamples.size(); w.setPaused(true); w.sample();
+        check(w.chart->longSamples.size()==size,"paused chart frozen");
+        auto settings=displaySettings(); settings.setValue("mini/opacity",30); settings.setValue("mini/font",2);
+        settings.setValue("mini/showAdapter",true); settings.setValue("mini/showTotals",true); settings.sync();
+        w.applyMiniSettings(); w.refreshDisplay();
+        check(w.mini->windowOpacity()>=.49 && w.mini->windowOpacity()<=.51 && w.miniValue->font().pointSize()==15
+              && w.miniValue->text().contains(QStringLiteral("本次")),"mini opacity clamped and large font optional totals applied");
+        QDir settingsRoot(QFileInfo(displaySettings().fileName()).absolutePath()); settingsRoot.cdUp();
+        QProcess miniChild; miniChild.start(QCoreApplication::applicationFilePath(),{"--check-mini",settingsRoot.path()});
+        check(miniChild.waitForFinished(10000) && miniChild.exitCode()==0,"mini preferences persist across process restart");
+        w.historyStore.dirty=true;
+        check(w.retentionTimer.interval()==60000,"periodic history save configured for sixty seconds");
+        QMetaObject::invokeMethod(&w.retentionTimer,"timeout",Qt::DirectConnection);
+        check(!w.historyStore.dirty && w.historySaveError.isEmpty(),"periodic timeout commits history even while paused");
+        settings.setValue("mini/opacity",100); settings.setValue("mini/font",1); settings.sync(); w.applyMiniSettings();
+        // Integration: deterministic clocks, no real adapter changes or notifications needed.
+        w.clearStatistics(); w.paused=false; w.notificationState.reset();
+        traffic::InterfaceInfo nic; nic.luid=888; nic.guid="{history-test}"; nic.description="history-test"; nic.up=true; nic.hardware=true;
+        w.savedAdapter="physical"; w.updateAdapterList({nic});
+        const QDateTime wall(QDate::currentDate(),QTime(12,0),QTimeZone::systemTimeZone());
+        w.processSample({nic},true,t,{},wall); nic.inOctets=100;
+        w.processSample({nic},true,t+std::chrono::milliseconds(500),{},wall.addMSecs(500));
+        const auto hist=w.historyStore.totals("physical",wall.date(),wall.date());
+        check(w.session.down==100 && hist.down>=100,"valid sample feeds session and historical bytes");
+        nic.inOctets=1000000;
+        w.processSample({nic},true,t+std::chrono::seconds(1),{},wall.addSecs(3600));
+        check(w.session.down==100,"wall clock jump rebaselines counters without spike");
+        nic.inOctets+=50;
+        w.processSample({nic},true,t+std::chrono::milliseconds(1500),{},wall.addSecs(3600).addMSecs(500));
+        check(w.session.down==150,"sampling resumes after clock rebaseline");
+        const auto persisted=w.historyStore.encode(); w.clearStatistics();
+        check(w.historyStore.encode()==persisted,"session reset preserves history");
+        w.setPaused(true);
+        if(!captures.isEmpty()) {
+            w.findChild<QComboBox *>("chartInterval")->setCurrentIndex(2);
+            w.resize(850,760); SpeedWindow::ensureVisible(&w); w.show(); w.mini->show(); QTest::qWait(80);
+            auto *scroll=w.findChild<QScrollArea *>("contentScroll"); scroll->verticalScrollBar()->setValue(0); QTest::qWait(30);
+            w.grab().save(captures+"/v130-main.png"); w.mini->grab().save(captures+"/v130-mini.png");
+            scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum()); QTest::qWait(30); w.grab().save(captures+"/v130-main-bottom.png");
+            QTimer::singleShot(100,&w,[&]{ if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) { dialog->grab().save(captures+"/v130-history.png"); dialog->accept(); } }); w.showHistory();
+            QTimer::singleShot(100,&w,[&]{ if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) { dialog->grab().save(captures+"/v130-mini-options.png"); dialog->accept(); } }); w.showMiniOptions();
+        }
+        w.mini->hide(); w.chart->setWindowSeconds(60);
+    }
+
     static void verifyV12(SpeedWindow &w, const QString &captureDir) {
         w.timer.stop();
         w.adapterSelector->setCurrentIndex(0);
@@ -29,9 +353,10 @@ struct Verification {
         w.updateAdapterList({nic});
         check(w.selection().scope == traffic::Scope::Single, "virtual adapter individually selected");
         const auto t = std::chrono::steady_clock::now();
+        const auto wall=QDateTime::currentDateTime();
         auto sample = [&](int ms, std::uint64_t down, std::uint64_t up) {
             nic.inOctets = down; nic.outOctets = up;
-            w.processSample({nic}, true, t + std::chrono::milliseconds(ms));
+            w.processSample({nic}, true, t + std::chrono::milliseconds(ms), {}, wall.addMSecs(ms));
         };
         sample(0, 1000000000, 2000000000);
         check(!w.sampleValid && w.records.empty(), "first sample only establishes baseline");
@@ -57,14 +382,14 @@ struct Verification {
         sample(3000, 9000000100, 9000000050);
         check(w.session.down == 2600 && w.records.size() == 3, "resume excludes pause traffic");
         const auto count = w.records.size();
-        w.processSample({}, true, t + std::chrono::milliseconds(3500));
+        w.processSample({}, true, t + std::chrono::milliseconds(3500), {}, wall.addMSecs(3500));
         check(w.adapterSelector->currentData().toString() == "{vpn-test}" && !w.sampleValid,
               "adapter unplug keeps selection and marks unavailable");
         sample(4000, 19000000000, 19000000000);
         check(w.records.size() == count && w.session.down == 2600, "reconnect baseline prevents spike");
         sample(4500, 19000000200, 19000000100);
         check(w.session.down == 2800, "reconnect subsequent delta counted");
-        w.processSample({}, false, t + std::chrono::milliseconds(5000), "test read failure");
+        w.processSample({}, false, t + std::chrono::milliseconds(5000), "test read failure", wall.addMSecs(5000));
         sample(5500, 29000000000, 29000000000);
         check(w.session.down == 2800 && !w.sampleValid, "read failure recovery discards missing interval");
         sample(6000, 29000000300, 29000000200);
@@ -229,6 +554,7 @@ struct Verification {
         w.hide(); emit w.tray->activated(QSystemTrayIcon::Trigger); QTest::qWait(80);
         check(nativeVisible(&w), "single tray click restores native window");
         w.resize(740, 510); w.move(90, 90); w.mini->resize(310, 170); w.mini->move(130, 130);
+        SpeedWindow::ensureVisible(&w); SpeedWindow::ensureVisible(w.mini);
         w.saveWindows();
         const auto mainGeometry = w.geometry(), miniGeometry = w.mini->geometry();
         const QString expectedPath = csvDir.filePath("geometry.ini");
@@ -503,6 +829,8 @@ struct Verification {
         window.mini->hide();
         verifyV12(window, captureDir);
         verifyV121(window, captureDir);
+        verifyV13(window, captureDir);
+        verifyF10(captureDir);
         window.session.down = 100;
         // 網卡選單：第一項是所有實體網卡、最後一項是全部介面；切換網卡會清空歷史並記住選擇
         check(window.adapterSelector->count() >= 2, "adapter selector populated");
@@ -558,6 +886,23 @@ int main(int argc, char **argv) {
     app.setOrganizationName("RealtimeNetworkSpeed");
     app.setApplicationName("RealtimeNetworkSpeed");
     QSettings::setDefaultFormat(QSettings::IniFormat);
+    if(app.arguments().size()==3 && app.arguments()[1]=="--f10-normal-exit") {
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,app.arguments()[2]);
+        return Verification::f10NormalExit(app,app.arguments()[2]);
+    }
+    if(app.arguments().size()==3 && app.arguments()[1]=="--history-crash") {
+        history::Store store(app.arguments()[2]);
+        auto wall=QDateTime(QDate::currentDate(),QTime(12,0),QTimeZone::systemTimeZone());
+        traffic::Rates r; r.inBytes=50; r.seconds=.5;
+        store.add("physical","Physical",r,wall,wall.addMSecs(500));
+        QString error; if(!store.save(error)) return 2;
+        store.add("physical","Physical",r,wall.addMSecs(500),wall.addMSecs(1000));
+        std::_Exit(0);
+    }
+    if(app.arguments().size()==3 && app.arguments()[1]=="--check-mini") {
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,app.arguments()[2]);
+        return Verification::miniRestored();
+    }
     if (app.arguments().size() == 3 && app.arguments()[1] == "--check-instance") {
         SingleInstance instance(app.arguments()[2]); return instance.start() == 0 ? 0 : 1;
     }
@@ -577,7 +922,7 @@ int main(int argc, char **argv) {
     check(settings.isValid(), "isolated preference directory");
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
     if (app.arguments().contains("--interactive-smoke")) return Verification::interactive(app);
-    const QString captures = app.arguments().size() > 1 ? app.arguments()[1] : QString();
+    const QString captures = app.arguments().size() > 1 ? app.arguments()[1] : qEnvironmentVariable("RNS_TEST_CAPTURES");
     if (!captures.isEmpty()) QDir().mkpath(captures);
     Verification::run(captures, settings.path());
     std::cout << (failures ? "FAILED" : "PASS") << ": conversion, auto thresholds, UI synchronization, history, live timer, process restart preferences, adapter selection\n";

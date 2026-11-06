@@ -27,6 +27,7 @@
 #include <QThread>
 #include <QDateTime>
 #include <QDialog>
+#include <QDateEdit>
 #include <QPlainTextEdit>
 #include <QFileDialog>
 #include <QSaveFile>
@@ -67,6 +68,9 @@
 #include <deque>
 
 #include "traffic.h"
+#include "history.h"
+#include <QSlider>
+#include <QTimeZone>
 #include "version.h"
 
 #pragma comment(lib, "iphlpapi.lib")
@@ -218,7 +222,35 @@ public:
 
     // 讀取失敗時傳入 NaN：保留時間位置，線會在該處斷開。
     using Time = std::chrono::steady_clock::time_point;
+    struct Point { Time time; double down, up; };
+    std::deque<Point> longSamples;
+    int windowSeconds = 60;
+    void setWindowSeconds(int seconds) { windowSeconds = seconds; update(); }
+    std::vector<Point> plotted() const {
+        std::vector<Point> result;
+        if (windowSeconds == 60) {
+            for (int i=0;i<times.size();++i) result.push_back({times[i],downloads[i],uploads[i]});
+            return result;
+        }
+        if (longSamples.empty()) return result;
+        const int bucketSeconds=windowSeconds==300 ? 2 : 10;
+        // Buckets containing a gap stay gaps; no line bridges a failed interval.
+        qint64 lastBucket=-1; double down=0,up=0; int n=0; bool gap=false; Time time{};
+        auto flush=[&] { if(n) result.push_back({time,gap ? NAN : down/n,gap ? NAN : up/n}); };
+        Time previous{};
+        for(const auto &p:longSamples) {
+            if(longSamples.back().time-p.time>std::chrono::seconds(windowSeconds)) continue;
+            const auto b=std::chrono::duration_cast<std::chrono::seconds>(p.time.time_since_epoch()).count()/bucketSeconds;
+            if(b!=lastBucket) { flush(); down=up=0; n=0; gap=false; lastBucket=b; }
+            gap=gap || !std::isfinite(p.down) || !std::isfinite(p.up)
+                || (previous!=Time{} && p.time-previous>std::chrono::seconds(2));
+            down+=std::isfinite(p.down)?p.down:0; up+=std::isfinite(p.up)?p.up:0; ++n; time=p.time; previous=p.time;
+        }
+        flush(); return result;
+    }
     void append(double download, double upload, Time now = std::chrono::steady_clock::now()) {
+        longSamples.push_back({now,download,upload});
+        while(longSamples.size()>3600 || (!longSamples.empty() && now-longSamples.front().time>std::chrono::minutes(30))) longSamples.pop_front();
         times.append(now);
         downloads.append(download);
         uploads.append(upload);
@@ -229,6 +261,7 @@ public:
     }
 
     void clear() {
+        longSamples.clear();
         downloads.clear();
         uploads.clear();
         times.clear();
@@ -237,8 +270,7 @@ public:
 
     double peakSpeed() const {
         double peak = 1.0;
-        for (double v : downloads) if (std::isfinite(v)) peak = std::max(peak, v);
-        for (double v : uploads) if (std::isfinite(v)) peak = std::max(peak, v);
+        for (const auto &p : plotted()) { if (std::isfinite(p.down)) peak=std::max(peak,p.down); if (std::isfinite(p.up)) peak=std::max(peak,p.up); }
         return peak;
     }
 
@@ -280,26 +312,24 @@ protected:
             p.drawText(QRect(2, y - 9, left - 9, 18), Qt::AlignRight | Qt::AlignVCenter, scale);
         }
         p.setPen(QColor("#8793a5"));
-        p.drawText(QPoint(left, height() - 8), QStringLiteral("60 秒前"));
+        p.drawText(QPoint(left, height() - 8), QStringLiteral("%1 秒前").arg(windowSeconds));
         p.drawText(QRect(right - 48, height() - 24, 48, 18), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("現在"));
 
-        auto drawSeries = [&](const QVector<double> &values, const QColor &color) {
-            QPainterPath path;
-            bool penDown = false;
-            for (int i = 0; i < values.size(); ++i) {
-                if (!std::isfinite(values[i])) { penDown = false; continue; }
-                if (i > 0 && times[i] - times[i-1] > std::chrono::seconds(2)) penDown = false;
-                const double age = std::chrono::duration<double>(times.last() - times[i]).count();
-                const qreal x = right - (right - left) * age / 60.0;
-                const qreal y = bottom - std::min(1.0, values[i] / top) * (bottom - topY);
-                if (penDown) path.lineTo(x, y); else path.moveTo(x, y);
-                penDown = true;
+        const auto points=plotted();
+        auto drawSeries = [&](bool upload, const QColor &color) {
+            QPainterPath path; bool penDown=false;
+            for (size_t i=0;i<points.size();++i) {
+                const auto &v=points[i]; const double value=upload?v.up:v.down;
+                if(!std::isfinite(value)) { penDown=false; continue; }
+                if(i && v.time-points[i-1].time>std::chrono::seconds(windowSeconds==60?2:windowSeconds==300?4:20)) penDown=false;
+                const double age=std::chrono::duration<double>(points.back().time-v.time).count();
+                const qreal x=right-(right-left)*age/windowSeconds;
+                const qreal y=bottom-std::min(1.0,value/top)*(bottom-topY);
+                if(penDown) path.lineTo(x,y); else path.moveTo(x,y); penDown=true;
             }
-            p.setPen(QPen(color, 2));
-            p.drawPath(path);
+            p.setPen(QPen(color,2)); p.drawPath(path);
         };
-        drawSeries(downloads, QColor("#0878e8"));
-        drawSeries(uploads, QColor("#13a878"));
+        drawSeries(false,QColor("#0878e8")); drawSeries(true,QColor("#13a878"));
     }
 
 private:
@@ -309,10 +339,48 @@ private:
     QVector<double> uploads;
 };
 
+class HistoryChart final : public QWidget {
+public:
+    history::Store *store; QString scope; int count=7;
+    explicit HistoryChart(history::Store *s,QWidget *p=nullptr):QWidget(p),store(s) { setMinimumHeight(230); }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this); p.fillRect(rect(),Qt::white); p.setRenderHint(QPainter::Antialiasing);
+        const QDate today=QDate::currentDate(); double peak=1;
+        for(int i=0;i<count;++i) { auto d=store->totals(scope,today.addDays(-i),today.addDays(-i)); peak=std::max({peak,double(d.down),double(d.up)}); }
+        const double top=traffic::niceAxis(peak/1e6).top*1e6;
+        const int left=72,bottom=height()-48; const double slot=double(width()-left-12)/count;
+        p.setPen(QColor("#617089")); p.drawText(QRect(0,0,left,24),Qt::AlignCenter,QStringLiteral("%1 MB").arg(top/1e6,0,'g',3));
+        p.drawLine(left,24,left,bottom); p.drawLine(left,bottom,width()-12,bottom);
+        for(int i=0;i<count;++i) {
+            const QDate date=today.addDays(i-count+1); const auto d=store->totals(scope,date,date);
+            const double x=left+i*slot;
+            p.fillRect(QRectF(x+slot*.12,bottom-(bottom-30)*d.down/top,slot*.34,(bottom-30)*d.down/top),QColor("#0878e8"));
+            p.fillRect(QRectF(x+slot*.5,bottom-(bottom-30)*d.up/top,slot*.34,(bottom-30)*d.up/top),QColor("#13a878"));
+            if(count==7 || i%5==0 || i==count-1) { p.setPen(QColor("#617089")); p.drawText(QRectF(x-8,bottom+6,std::max(45.0,slot+16),30),Qt::AlignLeft,date.toString("MM/dd")); }
+        }
+    }
+};
+
+static QString startupCommand(const QString &exe) {
+    if (!QFileInfo(exe).isAbsolute() || exe.contains('"') || exe.contains('\n') || exe.contains('\r')) return {};
+    return '"'+QDir::toNativeSeparators(QFileInfo(exe).absoluteFilePath())+QStringLiteral("\" --startup");
+}
+static QSettings startupSettings() { return QSettings(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),QSettings::NativeFormat); }
+static bool setStartup(QSettings &registry, bool on, const QString &exe, QString &error) {
+    const QString command=startupCommand(exe);
+    if(on && (command.isEmpty() || !QFileInfo(exe).isFile() || command.size()>260)) { error=QStringLiteral("執行檔路徑無效或過長，無法設定登入啟動。"); return false; }
+    if(on) registry.setValue("RealtimeNetworkSpeed",command); else registry.remove("RealtimeNetworkSpeed");
+    registry.sync();
+    if(registry.status()!=QSettings::NoError || (on && registry.value("RealtimeNetworkSpeed").toString()!=command) || (!on && registry.contains("RealtimeNetworkSpeed"))) { error=QStringLiteral("無法更新登入啟動設定。"); return false; }
+    return true;
+}
+
 class SpeedWindow final : public QWidget {
     friend struct Verification;
 public:
-    SpeedWindow() {
+    SpeedWindow() : historyStore(QDir(QFileInfo(displaySettings().fileName()).absolutePath()).filePath("traffic-history.json")) {
+        historyStore.load();
         setWindowTitle(QStringLiteral("即時網路速度"));
         setWindowIcon(QIcon(QStringLiteral(":/app.ico")));
         resize(850, 760);
@@ -400,7 +468,12 @@ public:
         auto *chartLayout = new QVBoxLayout(chartBox);
         chartLayout->setContentsMargins(14, 10, 14, 12);
         auto *chartHeader = new QHBoxLayout;
-        auto *chartTitle = new QLabel(QStringLiteral("速度趨勢（最近 60 秒）"));
+        auto *chartTitle = new QLabel(QStringLiteral("速度趨勢"));
+        auto *interval = new QComboBox;
+        interval->setObjectName("chartInterval"); interval->setAccessibleName(QStringLiteral("速度圖表區間"));
+        interval->addItem(QStringLiteral("60 秒"),60); interval->addItem(QStringLiteral("5 分鐘"),300); interval->addItem(QStringLiteral("30 分鐘"),1800);
+        chartHeader->addWidget(interval);
+        connect(interval,&QComboBox::currentIndexChanged,this,[this,interval] { chart->setWindowSeconds(interval->currentData().toInt()); refreshDisplay(); });
         chartTitle->setStyleSheet(QStringLiteral("font-weight:600;border:0;"));
         auto *legend = new QLabel(QStringLiteral("藍色：下載　 綠色：上傳"));
         legend->setStyleSheet(QStringLiteral("color:#617089;border:0;"));
@@ -458,6 +531,33 @@ public:
         controls->addWidget(topmost);
         controls->addWidget(closeToTray);
         layout->addLayout(controls);
+        auto *extras=new QHBoxLayout;
+        auto *historyButton=new QPushButton(QStringLiteral("歷史流量…")); historyButton->setObjectName("historyButton");
+        auto *miniOptions=new QPushButton(QStringLiteral("迷你設定…")); miniOptions->setObjectName("miniOptions");
+        auto *clearHistory=new QPushButton(QStringLiteral("清除歷史流量…")); clearHistory->setObjectName("clearHistoryButton");
+        clearHistory->setShortcut(QKeySequence(Qt::Key_F10));
+        connect(clearHistory,&QPushButton::clicked,this,[this]{ showClearHistory(this); });
+        extras->addWidget(historyButton); extras->addWidget(clearHistory); extras->addWidget(miniOptions); extras->addStretch(); layout->addLayout(extras);
+        connect(historyButton,&QPushButton::clicked,this,[this]{ showHistory(); });
+        connect(miniOptions,&QPushButton::clicked,this,[this]{ showMiniOptions(); });
+        auto *preferences=new QHBoxLayout;
+        startup=new QCheckBox(QStringLiteral("登入時啟動（縮至系統匣）")); startup->setObjectName("startup");
+        auto registry=startupSettings(); const QString registered=registry.value("RealtimeNetworkSpeed").toString();
+        startup->setChecked(!registered.isEmpty());
+        startup->setToolTip(registered.isEmpty()?QStringLiteral("預設關閉"):registered);
+        preferences->addWidget(startup);
+        if(!registered.isEmpty() && registered!=startupCommand(QCoreApplication::applicationFilePath())) {
+            auto *moved=new QLabel(QStringLiteral("登入啟動指向其他位置；取消後重新勾選可更新為目前程式。"));
+            moved->setWordWrap(true); layout->addWidget(moved);
+        }
+        notifications=new QCheckBox(QStringLiteral("網卡狀態通知")); notifications->setObjectName("notifications");
+        notifications->setChecked(settings.value("notifications/enabled",false).toBool()); preferences->addWidget(notifications); preferences->addStretch(); layout->addLayout(preferences);
+        connect(notifications,&QCheckBox::toggled,this,[this](bool on){ notificationState.reset(); savePreference("notifications/enabled",on); });
+        connect(startup,&QCheckBox::toggled,this,[this](bool on){ auto registry=startupSettings(); QString error;
+            if(!setStartup(registry,on,QCoreApplication::applicationFilePath(),error)) { QSignalBlocker block(startup); startup->setChecked(!on); QMessageBox::warning(this,QStringLiteral("登入啟動"),error); }
+            else startup->setToolTip(on?startupCommand(QCoreApplication::applicationFilePath()):QStringLiteral("已關閉"));
+        });
+        historySummary=new QLabel; historySummary->setWordWrap(true); layout->addWidget(historySummary);
         totalsLabel = new QLabel;
         totalsLabel->setWordWrap(true);
         layout->addWidget(totalsLabel);
@@ -516,11 +616,12 @@ public:
         tray->show();
         applyTopmost(topmost->isChecked());
 
+        applyMiniSettings();
         mini->adjustSize();
         restoreWindows();
-        connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { saveWindows(); });
+        connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { saveWindows(); saveHistory(); });
         connect(&retentionTimer, &QTimer::timeout, this, [this] {
-            pruneRecords(std::chrono::steady_clock::now()); refreshDisplay();
+            pruneRecords(std::chrono::steady_clock::now()); historyStore.prune(QDate::currentDate()); saveHistory(); refreshDisplay();
         });
         retentionTimer.start(60000);
         refreshDisplay();
@@ -529,7 +630,7 @@ public:
         sample();
     }
 
-    ~SpeedWindow() override { saveWindows(); delete mini; }
+    ~SpeedWindow() override { saveWindows(); saveHistory(); delete mini; }
 
     void activate() {
         ensureVisible(this);
@@ -719,10 +820,11 @@ private:
         processSample(std::move(infos), ok, std::chrono::steady_clock::now(), error);
     }
 
-    void processSample(std::vector<traffic::InterfaceInfo> infos, bool ok, SpeedChart::Time now, const QString &error = {}) {
+    void processSample(std::vector<traffic::InterfaceInfo> infos, bool ok, SpeedChart::Time now, const QString &error = {}, QDateTime wall = QDateTime::currentDateTime()) {
         if (paused) return;
         pruneRecords(now);
         if (!ok) {
+            observeState(2);
             status->setText(error + QStringLiteral("（將自動重試）"));
             const double gap = std::numeric_limits<double>::quiet_NaN();
             chart->append(gap, gap, now);
@@ -733,16 +835,22 @@ private:
         }
         updateAdapterList(infos);
 
+        const auto counters=traffic::selectCounters(infos,selection());
+        observeState(counters.empty()?0:1);
         traffic::Rates rates;
         if (hasPrevious) {
             const double seconds = std::chrono::duration<double>(now - previousTime).count();
             const traffic::Selection current = selection();
-            rates = traffic::computeRates(traffic::selectCounters(lastInfos, current),
-                                          traffic::selectCounters(infos, current), seconds);
+            const double wallSeconds=previousWall.msecsTo(wall)/1000.0;
+            if (std::abs(wallSeconds-seconds)>0.25 || wall.offsetFromUtc()!=previousWall.offsetFromUtc()) hasPrevious=false;
+            rates = hasPrevious ? traffic::computeRates(traffic::selectCounters(lastInfos, current),
+                                          traffic::selectCounters(infos, current), seconds) : traffic::Rates{};
             session.add(rates);
+            historyStore.add(adapterSelector->currentData().toString(),adapterSelector->currentText(),rates,previousWall,wall);
         }
         lastInfos = std::move(infos);
         previousTime = now;
+        previousWall = wall;
         hasPrevious = true;
         sampleValid = rates.seconds > 0;
         if (sampleValid) {
@@ -750,7 +858,7 @@ private:
             const auto scope = selection();
             if (scope.scope == traffic::Scope::Single)
                 for (const auto &i : lastInfos) if (i.guid == scope.guid) { name = adapterName(i); break; }
-            const auto timestamp = QDateTime::currentDateTime();
+            const auto timestamp = wall;
             records.push_back({timestamp.toOffsetFromUtc(timestamp.offsetFromUtc()).toString(Qt::ISODateWithMs),
                 name, adapterSelector->currentData().toString(), rates, session, now});
             unexportedRecords = true;
@@ -770,7 +878,14 @@ private:
             ? automaticUnit(std::max({currentDown, currentUp, chart->peakSpeed()})) : selected;
         downloadValue->setText(sampleValid ? formatSpeed(currentDown, display) : QStringLiteral("—"));
         uploadValue->setText(sampleValid ? formatSpeed(currentUp, display) : QStringLiteral("—"));
-        if (miniValue) miniValue->setText(QStringLiteral("↓ %1\n↑ %2").arg(downloadValue->text(), uploadValue->text()));
+        if (miniValue) {
+            QString text=QStringLiteral("↓ %1\n↑ %2").arg(downloadValue->text(),uploadValue->text());
+            auto settings=displaySettings();
+            if(settings.value("mini/showAdapter",false).toBool()) text+="\n"+adapterSelector->currentText();
+            if(settings.value("mini/showTotals",false).toBool()) text+=QStringLiteral("\n本次 ↓ %1 MB / ↑ %2 MB").arg(double(session.down)/1e6,0,'f',2).arg(double(session.up)/1e6,0,'f',2);
+            miniValue->setText(text);
+        }
+        refreshHistorySummary();
         if (totalsLabel) totalsLabel->setText(QStringLiteral("本次累積：下載 %1 MB　上傳 %2 MB　合計 %3 MB（切換網卡範圍歸零）")
             .arg(double(session.down)/1e6, 0, 'f', 3).arg(double(session.up)/1e6, 0, 'f', 3)
             .arg((double(session.down)+double(session.up))/1e6, 0, 'f', 3));
@@ -790,14 +905,17 @@ private:
             .arg(records.size()).arg(discardedRecords));
         chart->setUnit(display);
         QString text = QStringLiteral("%1；每 0.5 秒更新。1 KB/s = 8 Kbps，1 MB/s = 8 Mbps（十進位）。")
-            .arg(selected == SpeedUnit::Auto ? QStringLiteral("自動：依目前速度及 60 秒峰值統一單位")
+            .arg(selected == SpeedUnit::Auto ? QStringLiteral("自動：依目前速度及所選區間峰值統一單位")
                                             : QStringLiteral("下載、上傳與圖表使用所選單位"));
         if (saveFailed)
             text += QStringLiteral("（偏好儲存失敗）");
+        if (!historyStore.warning.isEmpty()) text+="\n"+historyStore.warning;
+        if (!historySaveError.isEmpty()) text+=QStringLiteral("\n歷史保存失敗：%1（下次自動重試）").arg(historySaveError);
         note->setText(text);
     }
 
     void clearStatistics() {
+        saveHistory(); notificationState.reset();
         session = {};
         records.clear();
         discardedRecords = 0;
@@ -813,6 +931,7 @@ private:
     void setPaused(bool value) {
         if (paused == value) return;
         paused = value;
+        saveHistory(); notificationState.reset();
         hasPrevious = false;
         pauseButton->setText(paused ? QStringLiteral("恢復監控") : QStringLiteral("暫停監控"));
         if (paused) timer.stop();
@@ -927,6 +1046,131 @@ private:
             event->accept(); qApp->quit();
         }
     }
+    history::Store historyStore;
+    QString historySaveError;
+    QLabel *historySummary=nullptr;
+    QCheckBox *startup=nullptr,*notifications=nullptr;
+    history::Notifications notificationState;
+    QDateTime previousWall;
+    void saveHistory() { QString error; if(!historyStore.save(error)) historySaveError=error; else historySaveError.clear(); }
+    void refreshHistorySummary() {
+        if(!historySummary) return;
+        const QDate now=QDate::currentDate(); const auto scope=adapterSelector->currentData().toString();
+        const auto today=historyStore.totals(scope,now,now), month=historyStore.totals(scope,QDate(now.year(),now.month(),1),now);
+        historySummary->setText(QStringLiteral("有效監控流量｜%1\n今日 ↓ %2 MB　↑ %3 MB　合計 %4 MB\n本月 ↓ %5 MB　↑ %6 MB　合計 %7 MB")
+            .arg(adapterSelector->currentText()).arg(double(today.down)/1e6,0,'f',3).arg(double(today.up)/1e6,0,'f',3).arg((double(today.down)+today.up)/1e6,0,'f',3)
+            .arg(double(month.down)/1e6,0,'f',3).arg(double(month.up)/1e6,0,'f',3).arg((double(month.down)+month.up)/1e6,0,'f',3));
+    }
+    void observeState(int state) {
+        if(!notifications || !notifications->isChecked()) return;
+        const int event=notificationState.observe(state);
+        if(event<0 || !tray || !QSystemTrayIcon::isSystemTrayAvailable() || !QSystemTrayIcon::supportsMessages()) return;
+        const QString text=event==0?QStringLiteral("監控範圍目前沒有已連線網卡"):event==1?QStringLiteral("監控範圍已恢復連線／讀取"):QStringLiteral("網卡資料讀取失敗，將自動重試");
+        tray->showMessage(QStringLiteral("即時網路速度"),text,QSystemTrayIcon::Information,4000);
+    }
+    void applyMiniSettings() {
+        auto settings=displaySettings();
+        mini->setWindowOpacity(std::clamp(settings.value("mini/opacity",100).toInt(),50,100)/100.0);
+        const int size=std::clamp(settings.value("mini/font",1).toInt(),0,2);
+        miniValue->setFont(QFont(QStringLiteral("Microsoft JhengHei UI"),size==0?9:size==1?11:15));
+        miniValue->setWordWrap(true); miniValue->setMaximumWidth(420);
+        mini->adjustSize(); ensureVisible(mini);
+    }
+    void showMiniOptions() {
+        QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("迷你視窗設定")); auto *layout=new QVBoxLayout(&dialog);
+        auto settings=displaySettings(); auto *label=new QLabel; layout->addWidget(label);
+        auto *opacity=new QSlider(Qt::Horizontal); opacity->setRange(50,100); opacity->setSingleStep(5); opacity->setAccessibleName(QStringLiteral("透明度")); opacity->setValue(std::clamp(settings.value("mini/opacity",100).toInt(),50,100)); layout->addWidget(opacity);
+        auto updateLabel=[label](int v){label->setText(QStringLiteral("透明度 %1%（50–100%）").arg(v));}; updateLabel(opacity->value());
+        connect(opacity,&QSlider::valueChanged,&dialog,[this,updateLabel](int v){ updateLabel(v); savePreference("mini/opacity",v); applyMiniSettings(); });
+        auto *font=new QComboBox; font->addItems({QStringLiteral("小"),QStringLiteral("中"),QStringLiteral("大")}); font->setAccessibleName(QStringLiteral("字體大小")); font->setCurrentIndex(std::clamp(settings.value("mini/font",1).toInt(),0,2)); layout->addWidget(new QLabel(QStringLiteral("字體大小"))); layout->addWidget(font);
+        connect(font,&QComboBox::currentIndexChanged,&dialog,[this](int v){savePreference("mini/font",v); applyMiniSettings();});
+        for(const auto &entry: {std::pair<const char*,QString>{"mini/showAdapter",QStringLiteral("顯示目前網卡")},{"mini/showTotals",QStringLiteral("顯示本次累積流量")}}) {
+            auto *box=new QCheckBox(entry.second); box->setChecked(settings.value(entry.first,false).toBool()); layout->addWidget(box);
+            const QString key=QLatin1String(entry.first); connect(box,&QCheckBox::toggled,&dialog,[this,key](bool on){savePreference(key,on); refreshDisplay(); mini->adjustSize();ensureVisible(mini);});
+        }
+        auto *close=new QPushButton(QStringLiteral("完成")); layout->addWidget(close); connect(close,&QPushButton::clicked,&dialog,&QDialog::accept); dialog.exec();
+    }
+    void showClearHistory(QWidget *parent) {
+        QDialog dialog(parent); dialog.setObjectName("clearHistoryDialog");
+        dialog.setWindowTitle(QStringLiteral("清除歷史流量")); dialog.resize(600,440);
+        auto *layout=new QVBoxLayout(&dialog);
+        auto *note=new QLabel(QStringLiteral("清除每日歷史及其復原備份中的對應紀錄，不可復原。可先匯出 CSV。\n「清空本次統計」另行操作；此處不會清空本次統計或中斷即時監控。")); note->setWordWrap(true); layout->addWidget(note);
+        auto *scope=new QComboBox; scope->setObjectName("clearHistoryScope"); scope->setAccessibleName(QStringLiteral("要清除的監控範圍"));
+        QMap<QString,QString> scopes;
+        for (const auto &d:historyStore.days) scopes[d.scope]=d.name;
+        scopes[adapterSelector->currentData().toString()]=adapterSelector->currentText();
+        for(auto it=scopes.begin();it!=scopes.end();++it) scope->addItem(it.value()+" ["+it.key()+"]",it.key());
+        scope->setCurrentIndex(scope->findData(adapterSelector->currentData()));
+        scope->addItem(QStringLiteral("所有監控範圍／網卡"),QString());
+        layout->addWidget(new QLabel(QStringLiteral("監控範圍（各範圍紀錄互相獨立）"))); layout->addWidget(scope);
+        auto *range=new QComboBox; range->setObjectName("clearHistoryRange"); range->setAccessibleName(QStringLiteral("要清除的日期範圍"));
+        range->addItems({QStringLiteral("最近 7 天（含今天）"),QStringLiteral("最近 30 天（含今天）"),QStringLiteral("自訂起訖日期（含首尾）"),QStringLiteral("全部保留日期")}); layout->addWidget(range);
+        const QDate today=QDate::currentDate();
+        auto *dates=new QHBoxLayout;
+        auto *first=new QDateEdit(today.addDays(-6)); first->setObjectName("clearHistoryFirst"); first->setAccessibleName(QStringLiteral("起始日期"));
+        auto *last=new QDateEdit(today); last->setObjectName("clearHistoryLast"); last->setAccessibleName(QStringLiteral("結束日期"));
+        for(auto *date:{first,last}) { date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd"); }
+        dates->addWidget(new QLabel(QStringLiteral("從"))); dates->addWidget(first); dates->addWidget(new QLabel(QStringLiteral("至"))); dates->addWidget(last); layout->addLayout(dates);
+        auto filter=[=] { return history::Filter{scope->currentData().toString(),range->currentIndex()==3?QDate():first->date(),range->currentIndex()==3?QDate():last->date()}; };
+        auto description=[=] { const auto f=filter(); return QStringLiteral("監控範圍：%1\n日期：%2\n符合 %3 筆每日紀錄（監控期間筆數可能增加）")
+            .arg(scope->currentText(),f.first.isValid()?f.first.toString(Qt::ISODate)+QStringLiteral(" 至 ")+f.last.toString(Qt::ISODate)+QStringLiteral("（含首尾）"):QStringLiteral("全部保留日期")).arg(historyStore.matching(f)); };
+        auto *preview=new QLabel; preview->setObjectName("clearHistoryPreview"); preview->setWordWrap(true); layout->addWidget(preview); layout->addStretch();
+        auto *buttons=new QHBoxLayout;
+        auto *exportCsv=new QPushButton(QStringLiteral("先匯出 CSV…")); exportCsv->setObjectName("clearHistoryExport");
+        auto *erase=new QPushButton(QStringLiteral("清除所選歷史…")); erase->setObjectName("clearHistoryApply"); erase->setAutoDefault(false);
+        auto *cancel=new QPushButton(QStringLiteral("取消")); cancel->setObjectName("clearHistoryCancel"); cancel->setDefault(true);
+        buttons->addWidget(exportCsv); buttons->addStretch(); buttons->addWidget(erase); buttons->addWidget(cancel); layout->addLayout(buttons);
+        auto update=[=] { const bool valid=filter().valid(); preview->setText(valid?description():QStringLiteral("起始日期不得晚於結束日期。")); erase->setEnabled(valid && historyStore.matching(filter())>0); exportCsv->setEnabled(valid && historyStore.matching(filter())>0); };
+        auto setRange=[=] { const int index=range->currentIndex(); if(index<2) { first->setDate(today.addDays(index==0?-6:-29)); last->setDate(today); } first->setEnabled(index==2); last->setEnabled(index==2); update(); };
+        connect(scope,&QComboBox::currentIndexChanged,&dialog,update);
+        connect(range,&QComboBox::currentIndexChanged,&dialog,setRange);
+        connect(first,&QDateEdit::dateChanged,&dialog,update); connect(last,&QDateEdit::dateChanged,&dialog,update);
+        connect(&timer,&QTimer::timeout,&dialog,update); setRange(); cancel->setFocus();
+        connect(cancel,&QPushButton::clicked,&dialog,&QDialog::reject);
+        connect(exportCsv,&QPushButton::clicked,&dialog,[&,filter] {
+            const QString path=QFileDialog::getSaveFileName(&dialog,QStringLiteral("匯出即將清除範圍的歷史"),QStringLiteral("歷史流量.csv"),QStringLiteral("CSV (*.csv)")); if(path.isEmpty()) return;
+            QString error; if(!history::Store::atomic(path,historyStore.csvData(filter()),error)) QMessageBox::warning(&dialog,QStringLiteral("匯出失敗"),error);
+            else QMessageBox::information(&dialog,QStringLiteral("匯出完成"),path);
+        });
+        connect(erase,&QPushButton::clicked,&dialog,[&,filter,description,update] {
+            const auto selected=filter();
+            QMessageBox confirm(QMessageBox::Warning,QStringLiteral("確認清除歷史流量"),description()+QStringLiteral("\n\n清除後不可復原。建議先取消並匯出 CSV。\n是否確定清除上述日期與監控範圍的歷史？"),QMessageBox::Yes|QMessageBox::Cancel,&dialog);
+            confirm.setObjectName("clearHistoryConfirm"); confirm.setButtonText(QMessageBox::Yes,QStringLiteral("確定清除")); confirm.setButtonText(QMessageBox::Cancel,QStringLiteral("取消"));
+            confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
+            if(confirm.exec()!=QMessageBox::Yes) return;
+            int removed=0; QString error,notice;
+            if(!historyStore.erase(selected,removed,error,notice)) { QMessageBox::warning(&dialog,QStringLiteral("清除失敗"),QStringLiteral("未清除歷史；主檔與記憶體資料保持原狀。\n%1").arg(error)); update(); return; }
+            historySaveError.clear(); refreshDisplay();
+            for(auto *widget:findChildren<QWidget *>()) if(auto *plot=dynamic_cast<HistoryChart *>(widget)) plot->update();
+            update();
+            QMessageBox::information(&dialog,QStringLiteral("清除完成"),QStringLiteral("已清除 %1 筆每日紀錄。新的有效取樣會繼續累積歷史。").arg(removed)+(notice.isEmpty()?QString():"\n"+notice));
+        });
+        dialog.exec();
+    }
+    void showHistory() {
+        QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("歷史流量")); dialog.resize(760,480);
+        auto *layout=new QVBoxLayout(&dialog); auto *note=new QLabel(QStringLiteral("僅統計有效監控期間；最多保留 365 天。範圍各自獨立，全部介面可能重複計算。")); note->setWordWrap(true); layout->addWidget(note);
+        auto *scope=new QComboBox; scope->setAccessibleName(QStringLiteral("歷史監控範圍")); QMap<QString,QString> scopes;
+        for(const auto &d:historyStore.days) scopes[d.scope]=d.name;
+        scopes[adapterSelector->currentData().toString()]=adapterSelector->currentText();
+        for(auto it=scopes.begin();it!=scopes.end();++it) scope->addItem(it.value()+" ["+it.key()+"]",it.key());
+        scope->setCurrentIndex(scope->findData(adapterSelector->currentData())); layout->addWidget(scope);
+        auto *range=new QComboBox; range->setAccessibleName(QStringLiteral("歷史日期範圍")); range->addItem(QStringLiteral("最近 7 天"),7); range->addItem(QStringLiteral("最近 30 天"),30); range->addItem(QStringLiteral("全部保留歷史（圖表顯示最近 30 天）"),0); layout->addWidget(range);
+        auto *legend=new QLabel(QStringLiteral("藍色：下載　綠色：上傳；無紀錄日期顯示空白。")); layout->addWidget(legend);
+        auto *plot=new HistoryChart(&historyStore); plot->setObjectName("historyPlot"); layout->addWidget(plot,1);
+        auto update=[plot,scope,range] { plot->scope=scope->currentData().toString(); plot->count=range->currentData().toInt()==7?7:30; plot->update(); };
+        connect(scope,&QComboBox::currentIndexChanged,&dialog,update); connect(range,&QComboBox::currentIndexChanged,&dialog,update); update();
+        connect(&retentionTimer,&QTimer::timeout,&dialog,update);
+        auto *buttons=new QHBoxLayout; auto *exportHistory=new QPushButton(QStringLiteral("匯出所選範圍 CSV…")); buttons->addWidget(exportHistory); auto *clearHistory=new QPushButton(QStringLiteral("清除歷史流量…")); clearHistory->setObjectName("historyClearButton"); buttons->addWidget(clearHistory);
+        connect(clearHistory,&QPushButton::clicked,&dialog,[this,&dialog,update]{ showClearHistory(&dialog); update(); }); buttons->addStretch(); auto *close=new QPushButton(QStringLiteral("關閉")); buttons->addWidget(close); layout->addLayout(buttons);
+        connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);
+        connect(exportHistory,&QPushButton::clicked,&dialog,[this,&dialog,scope,range] {
+            const QString key=scope->currentData().toString(); const int count=range->currentData().toInt();
+            const QString path=QFileDialog::getSaveFileName(&dialog,QStringLiteral("匯出歷史統計"),QStringLiteral("每日流量.csv"),QStringLiteral("CSV (*.csv)")); if(path.isEmpty())return;
+            QString error; if(!history::Store::atomic(path,historyStore.csvData(key,count),error)) QMessageBox::warning(&dialog,QStringLiteral("匯出失敗"),error);
+            else QMessageBox::information(&dialog,QStringLiteral("匯出完成"),path);
+        }); dialog.exec();
+    }
     bool paused = false;
     std::deque<CsvRecord> records;
     quint64 discardedRecords = 0;
@@ -1033,6 +1277,7 @@ int main(int argc, char *argv[])
     }
     SpeedWindow window;
     instance.onActivation(window);
-    window.show();
+    if(app.arguments().contains(QStringLiteral("--startup")) && QSystemTrayIcon::isSystemTrayAvailable()) window.hide();
+    else window.show();
     return app.exec();
 }
