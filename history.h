@@ -11,6 +11,10 @@
 #include <QSaveFile>
 #include <QUuid>
 #include <limits>
+#include <chrono>
+#ifdef HISTORY_VERIFICATION
+#include <functional>
+#endif
 #include "traffic.h"
 
 namespace history {
@@ -43,28 +47,70 @@ public:
     explicit Store(QString file = {}) : path(std::move(file)) {}
     QString path, warning;
     QMap<QString, Day> days;
+    quint64 structureRevision=0; // membership only: bytes changing cannot change deletion counts
     QDate newest; // high-water date: a backwards clock cannot resurrect expired dates
     bool dirty = false, writable = true;
+    using Clock = std::chrono::steady_clock;
+    QDateTime clockAnchor;
+    Clock::time_point monotonicAnchor;
+    QString clockWarning, dateNotice, intervalWarning;
+    bool startupRecoveryPending=false;
+    // Independent of newest: repeatedly moving the wall clock cannot ratchet retention.
+    void anchor(QDate date, Clock::time_point now = Clock::now()) {
+        clockAnchor=QDateTime(date,QTime(12,0),QTimeZone::UTC); monotonicAnchor=now;
+    }
+    bool acceptDate(QDate date, Clock::time_point now = Clock::now()) {
+        if (!date.isValid()) return false;
+        if (!clockAnchor.isValid()) anchor(date,now);
+        const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(now-monotonicAnchor).count();
+        const QDate expected=clockAnchor.addMSecs(std::max<qint64>(0,elapsed)).date();
+        if (std::abs(expected.daysTo(date))>2) {
+            clockWarning=QStringLiteral("系統日期與可信日期 %1 差距過大，已暫停歷史累積與修剪。請校正日期；確認目前日期正確後可按「確認歷史日期」。").arg(expected.toString(Qt::ISODate));
+            return false;
+        }
+        clockWarning.clear(); return true;
+    }
     static QString key(QDate date, const QString &scope) { return date.toString(Qt::ISODate) + '/' + scope; }
-    void prune(QDate today) {
-        newest = std::max(newest, today);
+    bool prune(QDate today, Clock::time_point now = Clock::now()) {
+        if (!acceptDate(today,now)) return false;
+        if (startupRecoveryPending) {
+            bool expires=false;
+            for (const auto &d : days) if (d.date<today.addDays(-364)) { expires=true; break; }
+            if (expires) {
+                QString snapshot, error;
+                if (!createDateSnapshot(snapshot,error)) {
+                    clockWarning=QStringLiteral("無法建立日期復原快照，已暫停歷史累積與修剪，原資料保持不變：%1（下次自動重試）").arg(error);
+                    return false;
+                }
+                dateNotice=QStringLiteral("啟動日期已前進；修剪前的完整歷史快照：%1（最多保留 3 份）").arg(snapshot);
+                rotateDateSnapshots(snapshot);
+            }
+            startupRecoveryPending=false;
+        }
+        if (today>newest) { newest=today; dirty=true; }
         for (auto it = days.begin(); it != days.end();) {
-            if (it->date < newest.addDays(-364)) { it = days.erase(it); dirty = true; }
+            if (it->date < newest.addDays(-364)) { it = days.erase(it); dirty = true; ++structureRevision; }
             else ++it;
         }
+        return true;
     }
     void addPart(QDate date, const QString &scope, const QString &name, quint64 down, quint64 up, double seconds) {
-        if (date < newest.addDays(-364)) return;
+        if (!date.isValid() || !newest.isValid() || date>newest || date < newest.addDays(-364)) return;
+        if (!days.contains(key(date,scope))) ++structureRevision;
         auto &d = days[key(date, scope)]; d.date = date; d.scope = scope; d.name = name;
         d.down = plus(d.down, down); d.up = plus(d.up, up); d.seconds += seconds; dirty = true;
     }
     // Only call with a valid monotonic sample; wall-clock jumps are rejected here too.
     void add(const QString &scope, const QString &name, const traffic::Rates &r,
-             QDateTime start, QDateTime end) {
+             QDateTime start, QDateTime end, Clock::time_point now = Clock::now()) {
         if (!(r.seconds > 0) || !start.isValid() || !end.isValid()) return;
+        intervalWarning.clear();
         const qint64 ms = start.msecsTo(end);
-        if (ms <= 0 || std::abs(ms / 1000.0 - r.seconds) > 0.25) return;
-        prune(end.date());
+        if (!acceptDate(end.date(),now)) return;
+        if (ms <= 0 || std::abs(ms / 1000.0 - r.seconds) > 0.25) {
+            intervalWarning=QStringLiteral("系統時間與取樣間隔不一致，已略過此次歷史記錄；時間恢復後自動繼續。"); return;
+        }
+        if (!prune(end.date(),now)) return;
         if (start.date() == end.date()) { addPart(end.date(), scope, name, r.inBytes, r.outBytes, r.seconds); return; }
         const QDateTime midnight(end.date(), QTime(0,0), end.timeZone());
         const double fraction = std::clamp(double(start.msecsTo(midnight)) / double(ms), 0.0, 1.0);
@@ -93,8 +139,8 @@ public:
         if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
         const auto obj = doc.object();
         if (obj["version"].toInt(-1) != 1 || !obj["days"].isArray()) return false;
-        high = QDate::fromString(obj["newest"].toString(),Qt::ISODate);
-        if (!high.isValid()) return false;
+        const QDate parsedHigh = QDate::fromString(obj["newest"].toString(),Qt::ISODate);
+        if (!parsedHigh.isValid()) return false;
         QMap<QString,Day> parsed;
         const auto rows = obj["days"].toArray();
         if (rows.size() > 36500) return false;
@@ -104,12 +150,12 @@ public:
             d.scope=o["scope"].toString(); d.name=o["name"].toString();
             bool a=false,b=false; const auto ds=o["download"].toString(), us=o["upload"].toString();
             d.down=ds.toULongLong(&a); d.up=us.toULongLong(&b); d.seconds=o["seconds"].toDouble(-1);
-            if (!d.date.isValid() || d.date > high || d.scope.isEmpty() || d.scope.size()>256 || d.name.size()>2048
+            if (!d.date.isValid() || d.date > parsedHigh || d.scope.isEmpty() || d.scope.size()>256 || d.name.size()>2048
                 || !a || !b || QString::number(d.down)!=ds || QString::number(d.up)!=us
                 || !std::isfinite(d.seconds) || d.seconds<0 || parsed.contains(key(d.date,d.scope))) return false;
             parsed.insert(key(d.date,d.scope), d);
         }
-        result=parsed; return true;
+        result=std::move(parsed); high=parsedHigh; return true;
     }
     bool read(const QString &file, QMap<QString,Day> &result, QDate &high) const {
         QFile f(file); return f.open(QIODevice::ReadOnly) && f.size()<=16*1024*1024 && decode(f.readAll(),result,high);
@@ -121,7 +167,7 @@ public:
         writable=false; warning=QStringLiteral("無法保留異常歷史檔，已停止寫入；請檢查資料夾權限。"); return false;
     }
     void load(QDate today = QDate::currentDate()) {
-        days.clear(); newest=today; dirty=false; writable=true; warning.clear();
+        days.clear(); ++structureRevision; newest=today; dirty=false; writable=true; warning.clear(); clockWarning.clear(); dateNotice.clear(); intervalWarning.clear(); startupRecoveryPending=false; clockAnchor={};
         if (QFile::exists(path)) {
             if (!read(path,days,newest)) {
                 preserve(path);
@@ -134,9 +180,20 @@ public:
             if (read(path+".bak",days,newest)) { warning=QStringLiteral("歷史主檔遺失，已從備份復原。"); dirty=true; }
             else { preserve(path+".bak"); dirty=true; }
         }
+        // A powered-off interval cannot be checked with this process's monotonic clock.
+        // Only a backwards startup date is quarantined against the saved high-water mark.
+        if (today<newest.addDays(-2)) { anchor(newest); acceptDate(today); return; }
+        startupRecoveryPending=newest.daysTo(today)>2;
+        anchor(today);
         prune(today);
     }
+#ifdef HISTORY_VERIFICATION
+    inline static std::function<bool(const QString &)> failWrite;
+#endif
     static bool atomic(const QString &file, const QByteArray &bytes, QString &error) {
+#ifdef HISTORY_VERIFICATION
+        if (failWrite && failWrite(file)) { error=QStringLiteral("Injected write failure"); return false; }
+#endif
         QSaveFile f(file); f.setDirectWriteFallback(false);
         if (!f.open(QIODevice::WriteOnly) || f.write(bytes)!=bytes.size() || !f.commit()) { error=f.errorString(); return false; }
         return true;
@@ -153,6 +210,70 @@ public:
         // First successful save also provides a recovery point.
         if (!QFile::exists(path+".bak") && !atomic(path+".bak",encode(),error)) return false;
         dirty=false; return true;
+    }
+    bool createDateSnapshot(QString &snapshot, QString &error) const {
+        if (!writable || path.isEmpty() || !QDir().mkpath(QFileInfo(path).absolutePath())) {
+            error=QStringLiteral("無法建立歷史復原快照資料夾"); return false;
+        }
+        snapshot=path+".date-recovery-"+QUuid::createUuid().toString(QUuid::Id128);
+        return atomic(snapshot,encode(),error);
+    }
+    void rotateDateSnapshots(const QString &snapshot) {
+        // Always retain the newly committed file, including equal filesystem timestamps.
+        const QFileInfo info(path);
+        const auto files=info.dir().entryInfoList({info.fileName()+".date-recovery-*"},QDir::Files,QDir::Time);
+        int retained=1;
+        for (const auto &file : files) {
+            if (file.absoluteFilePath()==QFileInfo(snapshot).absoluteFilePath()) continue;
+            if (retained++<3) continue;
+            if (!QFile::remove(file.absoluteFilePath()))
+                dateNotice+=QStringLiteral("\n歷史已保留，但無法清理舊日期快照：%1；下次建立快照時重試。").arg(file.absoluteFilePath());
+        }
+    }
+    bool confirmDate(QDate today, QString &error) {
+        if (!writable || !today.isValid()) { error=QStringLiteral("無法確認歷史日期。"); return false; }
+        if (!QDir().mkpath(QFileInfo(path).absolutePath())) { error=QStringLiteral("無法建立歷史資料夾"); return false; }
+        error.clear();
+        // Repeated confirmations of a healthy, already accepted date are a no-op.
+        if (clockWarning.isEmpty() && !startupRecoveryPending && clockAnchor.date()==today) return true;
+        Store candidate=*this;
+        // Future-dated legacy rows stay in the immutable snapshot, never relabel bytes.
+        for (auto it=candidate.days.begin(); it!=candidate.days.end();) {
+            if (it->date>today) it=candidate.days.erase(it); else ++it;
+        }
+        candidate.startupRecoveryPending=false;
+        candidate.newest=today; candidate.anchor(today); candidate.prune(today);
+        candidate.clockWarning.clear(); candidate.dirty=true; ++candidate.structureRevision;
+        const QString backup=path+".bak";
+        const bool hadBackup=QFile::exists(backup);
+        QByteArray previousBackup;
+        if (hadBackup) {
+            QFile f(backup);
+            if (!f.open(QIODevice::ReadOnly)) { error=f.errorString(); return false; }
+            previousBackup=f.readAll();
+            if (f.error()!=QFileDevice::NoError) { error=f.errorString(); return false; }
+            f.close();
+        }
+        QString snapshot;
+        if (!createDateSnapshot(snapshot,error)) return false;
+        if (hadBackup && !QFile::remove(backup)) {
+            error=QStringLiteral("無法移除舊復原備份，未變更日期基準。");
+            if (!QFile::remove(snapshot)) error+=QStringLiteral("；未完成的快照保留於 %1").arg(snapshot);
+            return false;
+        }
+        const auto bytes=candidate.encode();
+        if (!atomic(path,bytes,error)) {
+            QString backupError;
+            if (hadBackup && !atomic(backup,previousBackup,backupError)) error+=QStringLiteral("；備份還原失敗：%1").arg(backupError);
+            if (!QFile::remove(snapshot)) error+=QStringLiteral("；未完成的快照保留於 %1").arg(snapshot);
+            return false;
+        }
+        candidate.dirty=false;
+        candidate.dateNotice=QStringLiteral("日期已確認；完整歷史快照：%1（最多保留 3 份）").arg(snapshot);
+        candidate.rotateDateSnapshots(snapshot);
+        QString backupError;
+        if (!atomic(backup,bytes,backupError)) candidate.dateNotice+=QStringLiteral("\n日期已更新，但復原備份暫時無法建立：%1").arg(backupError);
+        *this=std::move(candidate); return true;
     }
     int matching(const Filter &filter) const {
         int count=0; for (const auto &day : days) if (filter.matches(day)) ++count; return count;
@@ -190,7 +311,7 @@ public:
             return false;
         }
         removed=days.size()-candidate.days.size();
-        days=std::move(candidate.days); dirty=false;
+        days=std::move(candidate.days); ++structureRevision; dirty=false;
         // No failure may be reported after the authoritative main-file commit.
         // A missing backup is safe; an old backup would not be.
         QString backupError;

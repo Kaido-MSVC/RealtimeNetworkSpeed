@@ -1,3 +1,4 @@
+#define HISTORY_VERIFICATION
 #define main applicationMain
 #include "../main.cpp"
 #undef main
@@ -8,6 +9,7 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <iostream>
+#include <psapi.h>
 
 static int failures = 0;
 static void check(bool condition, const char *message) {
@@ -15,6 +17,273 @@ static void check(bool condition, const char *message) {
 }
 
 struct Verification {
+    static int measureCsv(bool independent) {
+        auto memory=[] { PROCESS_MEMORY_COUNTERS_EX m{}; m.cb=sizeof(m);
+            K32GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&m),sizeof(m)); return m; };
+        std::deque<CsvRecord> records;
+        const QString adapter=QStringLiteral("Intel(R) Ethernet Controller I225-V / 實體網路介面");
+        const QString key=QStringLiteral("{01234567-89ab-cdef-0123-456789abcdef}");
+        const auto wall=QDateTime(QDate(2026,11,6),QTime(0,0),QTimeZone::UTC);
+        const auto before=memory(); const auto begin=std::chrono::steady_clock::now();
+        for(int i=0;i<172800;++i) {
+            traffic::Rates rates; rates.seconds=.5; rates.inBytes=12345; rates.outBytes=6789;
+            records.push_back({wall.addMSecs(i*500LL).toString(Qt::ISODateWithMs),
+                independent?QString::fromUtf8(adapter.toUtf8()):adapter,
+                independent?QString::fromUtf8(key.toUtf8()):key,rates,{},begin+std::chrono::milliseconds(i*500LL)});
+        }
+        const auto full=memory();
+        QTemporaryDir dir; QString error;
+        const auto exportStart=std::chrono::steady_clock::now();
+        const bool ok=writeCsv(dir.filePath("full.csv"),records,error);
+        const auto exported=memory();
+        std::cout << "CSV_MEMORY mode=" << (independent?"independent-strings":"shared-adapter-and-key")
+            << " count=" << records.size() << " sizeof_record=" << sizeof(CsvRecord)
+            << " private_delta=" << (qint64(full.PrivateUsage)-qint64(before.PrivateUsage))
+            << " working_set_delta=" << (qint64(full.WorkingSetSize)-qint64(before.WorkingSetSize))
+            << " export_peak_working_set=" << exported.PeakWorkingSetSize
+            << " export_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-exportStart).count()
+            << " csv_bytes=" << QFileInfo(dir.filePath("full.csv")).size() << " ok=" << ok << '\n';
+        return ok?0:1;
+    }
+    static void verifyAudit(SpeedWindow &w,const QString &captures) {
+        QTemporaryDir dir; const QDate today(2026,11,6);
+        const auto mono=history::Store::Clock::now();
+        const QDateTime wall(today,QTime(12,0),QTimeZone::UTC);
+        traffic::Rates r; r.inBytes=100; r.outBytes=20; r.seconds=.5;
+        history::Store store(dir.filePath("guard.json")); store.load(today);
+        store.addPart(today.addDays(-364),"p","p",1,2,.5);
+        store.add("p","p",r,wall,wall.addMSecs(500),mono);
+        QString error; check(store.save(error),"audit initial trusted checkpoint");
+        const auto original=store.encode(), main=bytes(store.path), backup=bytes(store.path+".bak");
+        const auto future=wall.addYears(2);
+        for(int i=0;i<6;++i) {
+            store.add("p","p",r,future.addMSecs(i*500),future.addMSecs((i+1)*500),mono+std::chrono::milliseconds((i+1)*500));
+            store.prune(future.date(),mono+std::chrono::seconds(i));
+            check(store.save(error),"audit quarantined periodic save is safe");
+        }
+        check(store.encode()==original && bytes(store.path)==main && bytes(store.path+".bak")==backup
+            && !store.clockWarning.isEmpty(),"audit multiple future samples and retention ticks preserve all memory/main/backup");
+        store.add("p","p",r,wall.addSecs(10),wall.addSecs(10).addMSecs(500),mono+std::chrono::seconds(10));
+        check(store.clockWarning.isEmpty() && store.totals("p",today,today).down==200,"audit corrected clock resumes immediately");
+        const auto corrected=store.encode();
+        store.add("p","p",r,wall.addYears(-2),wall.addYears(-2).addMSecs(500),mono+std::chrono::seconds(11));
+        check(store.encode()==corrected && !store.clockWarning.isEmpty(),"audit backward multi-year clock quarantined");
+        // Natural long-running time progresses via the independent monotonic anchor.
+        store.anchor(today,mono);
+        const auto next=wall.addDays(365);
+        store.add("p","p",r,next,next.addMSecs(500),mono+std::chrono::hours(365*24));
+        check(store.newest==today.addDays(365) && store.days.size()==1,"audit natural elapsed year advances retention and prunes expired rows");
+        // Startup forward gaps are legitimate powered-off intervals. Preserve before pruning.
+        for (int gap : {3,7,30}) {
+            history::Store seed(dir.filePath(QString("startup-%1.json").arg(gap))); seed.load(today);
+            seed.addPart(today.addDays(-364),"p","p",1,2,.5);
+            seed.addPart(today,"p","p",11,2,.5);
+            check(seed.save(error),"startup fixture saved");
+            const auto complete=seed.encode();
+            history::Store restart(seed.path); restart.load(today.addDays(gap));
+            const auto snapshots=QDir(dir.path()).entryList({QFileInfo(seed.path).fileName()+".date-recovery-*"},QDir::Files);
+            check(restart.clockWarning.isEmpty() && restart.newest==today.addDays(gap) && restart.days.size()==1
+                && snapshots.size()==1 && bytes(dir.filePath(snapshots.value(0)))==complete,
+                "startup 3/7/30 day absence snapshots full history before pruning");
+            const auto resumed=wall.addDays(gap);
+            restart.add("p","p",r,resumed,resumed.addMSecs(500));
+            check(restart.totals("p",resumed.date(),resumed.date()).down==100,"startup 3/7/30 day absence records normally");
+            check(restart.save(error),"startup resumed history persists");
+            history::Store reload(seed.path); reload.load(resumed.date());
+            check(reload.totals("p",resumed.date(),resumed.date()).down==100,"startup resumed history survives restart");
+        }
+        history::Store mismatch; mismatch.load(today);
+        mismatch.add("p","p",r,wall,wall.addSecs(3600),mono);
+        check(mismatch.clockWarning.isEmpty() && !mismatch.intervalWarning.isEmpty() && mismatch.days.isEmpty(),"within-day wall clock jump reports skipped history sample");
+        mismatch.add("p","p",r,wall.addSecs(3600),wall.addSecs(3600).addMSecs(500),mono+std::chrono::seconds(1));
+        check(mismatch.clockWarning.isEmpty() && mismatch.intervalWarning.isEmpty() && mismatch.totals("p",today,today).down==100,"valid interval after within-day clock jump resumes history");
+        history::Store recent(dir.filePath("recent.json")); recent.load(today);
+        recent.addPart(today,"p","p",5,2,.5); check(recent.save(error),"recent fixture");
+        recent.load(today.addDays(30));
+        check(QDir(dir.path()).entryList({"recent.json.date-recovery-*"},QDir::Files).isEmpty()
+            && recent.clockWarning.isEmpty(),"startup without expired rows needs no snapshot");
+        check(recent.save(error),"persist forward date for backwards-startup fixture");
+        history::Store backwards(recent.path); backwards.load(today.addDays(27));
+        const auto backwardsBefore=backwards.encode();
+        backwards.add("p","p",r,wall.addDays(27),wall.addDays(27).addMSecs(500));
+        check(!backwards.clockWarning.isEmpty() && backwards.encode()==backwardsBefore,"startup backwards more than two days blocks explicitly without changing data");
+        backwards.load(today.addDays(28));
+        check(backwards.clockWarning.isEmpty(),"startup backwards two days remains accepted");
+        history::Store restart(store.path);
+        const auto snapshotFiles=[&] { return QDir(dir.path()).entryList({"guard.json.date-recovery-*"},QDir::Files); };
+        history::Store::failWrite=[](const QString &file) { return file.contains(".date-recovery-"); };
+        restart.load(today.addDays(30));
+        check(restart.encode()==original && bytes(restart.path)==main && bytes(restart.path+".bak")==backup
+            && !restart.clockWarning.isEmpty() && snapshotFiles().isEmpty(),"snapshot creation failure preserves memory main backup and expired rows");
+        restart.add("p","p",r,wall.addDays(30),wall.addDays(30).addMSecs(500));
+        check(restart.encode()==original && snapshotFiles().isEmpty(),"snapshot failure retry cannot accumulate or prune");
+        history::Store::failWrite={};
+        check(restart.prune(today.addDays(30)) && restart.clockWarning.isEmpty() && snapshotFiles().size()==1,
+            "snapshot storage recovery retries automatically before pruning");
+        check(bytes(dir.filePath(snapshotFiles().first()))==original,"automatic recovery snapshot is complete");
+        // Force manual reanchor; a failed main commit must remove its provisional snapshot.
+        restart.load(today); restart.prune(today.addYears(2));
+        const auto beforeFiles=snapshotFiles();
+        HANDLE locked=CreateFileW(reinterpret_cast<LPCWSTR>(restart.path.utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        check(locked!=INVALID_HANDLE_VALUE,"audit lock date-recovery primary");
+        if(locked!=INVALID_HANDLE_VALUE) {
+            check(!restart.confirmDate(today.addYears(2),error) && restart.encode()==original
+                && bytes(restart.path)==main && bytes(restart.path+".bak")==backup && snapshotFiles()==beforeFiles,
+                "failed date confirmation preserves memory primary backup and removes provisional snapshot");
+            CloseHandle(locked);
+        }
+        for(int i=0;i<5;++i) {
+            restart.prune(today.addYears(3+i));
+            check(restart.confirmDate(today.addDays(i+1),error),"manual date recovery succeeds");
+            check(snapshotFiles().size()<=3,"manual snapshots rotate to at most three");
+            const auto acceptedFiles=snapshotFiles(); const auto accepted=restart.encode();
+            const auto warning=restart.warning, notice=restart.dateNotice;
+            check(restart.confirmDate(today.addDays(i+1),error) && snapshotFiles()==acceptedFiles
+                && restart.encode()==accepted && restart.warning==warning && restart.dateNotice==notice,
+                "repeated healthy confirmation is no-op without snapshots or appended warnings");
+        }
+        const auto keptFiles=snapshotFiles();
+        const auto keptState=restart.encode();
+        restart.prune(today.addYears(20));
+        bool sawUnrotated=false;
+        history::Store::failWrite=[&](const QString &file) {
+            if (!file.contains(".date-recovery-")) return false;
+            sawUnrotated=snapshotFiles()==keptFiles; return true;
+        };
+        check(!restart.confirmDate(today,error) && sawUnrotated && restart.encode()==keptState && snapshotFiles()==keptFiles,
+            "failed new snapshot never rotates existing three snapshots");
+        history::Store::failWrite={};
+        history::Store::failWrite=[&](const QString &file) { return file==restart.path; };
+        const auto committedMain=bytes(restart.path), committedBackup=bytes(restart.path+".bak");
+        check(!restart.confirmDate(today,error) && restart.encode()==keptState && snapshotFiles()==keptFiles
+            && bytes(restart.path)==committedMain && bytes(restart.path+".bak")==committedBackup,
+            "injected main commit failure restores backup and retains all prior snapshots");
+        history::Store::failWrite={};
+        // Both delete-backup failure and post-commit backup failure exercise real transaction boundaries.
+        const auto backupPath=restart.path+".bak";
+        locked=CreateFileW(reinterpret_cast<LPCWSTR>(backupPath.utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        check(locked!=INVALID_HANDLE_VALUE,"lock confirmation backup");
+        if(locked!=INVALID_HANDLE_VALUE) {
+            check(!restart.confirmDate(today,error) && restart.encode()==keptState && snapshotFiles()==keptFiles,
+                "backup removal failure discards provisional snapshot without rotating existing files");
+            CloseHandle(locked);
+        }
+        history::Store::failWrite=[&](const QString &file) { return file==backupPath; };
+        check(restart.confirmDate(today,error) && bytes(restart.path)==restart.encode() && !QFile::exists(backupPath)
+            && restart.dateNotice.contains(QStringLiteral("復原備份暫時無法建立")),"post-commit backup failure retains committed main and reports success with notice");
+        history::Store::failWrite={};
+        // Automatic rotation also retains the newest complete pre-prune state.
+        for(int i=0;i<5;++i) {
+            restart.addPart(restart.newest.addDays(-364),"expired","expired",quint64(i+1),0,.5);
+            restart.dirty=true; check(restart.save(error),"automatic rotation seed saved");
+            const auto full=restart.encode();
+            restart.load(restart.newest.addDays(3));
+            bool found=false; for(const auto &file:snapshotFiles()) if(bytes(dir.filePath(file))==full) found=true;
+            check(found && snapshotFiles().size()==3 && restart.clockWarning.isEmpty(),"automatic rotation preserves newest full snapshot and retains three");
+        }
+        const auto beforeRotation=snapshotFiles();
+        QList<HANDLE> snapshotLocks;
+        for(const auto &file:beforeRotation) {
+            const auto path=dir.filePath(file);
+            HANDLE handle=CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+            check(handle!=INVALID_HANDLE_VALUE,"lock existing recovery snapshot for rotation failure");
+            if(handle!=INVALID_HANDLE_VALUE) snapshotLocks.append(handle);
+        }
+        const auto beforeLockedRecovery=restart.encode();
+        restart.prune(restart.newest.addYears(2));
+        check(restart.confirmDate(today,error) && snapshotFiles().size()==4
+            && restart.dateNotice.contains(QStringLiteral("無法清理舊日期快照")),
+            "locked old snapshot reports cleanup failure while preserving committed recovery");
+        bool completeNew=false;
+        for(const auto &file:snapshotFiles()) if(!beforeRotation.contains(file) && bytes(dir.filePath(file))==beforeLockedRecovery) completeNew=true;
+        check(completeNew,"rotation cleanup failure retains complete newest snapshot");
+        for(HANDLE handle:snapshotLocks) CloseHandle(handle);
+        restart.prune(today.addYears(2));
+        check(restart.confirmDate(today,error) && snapshotFiles().size()==3
+            && !restart.dateNotice.contains(QStringLiteral("無法清理舊日期快照")),
+            "next successful recovery retries cleanup and restores three-snapshot bound");
+        history::Store poisoned(dir.filePath("poison.json")); poisoned.newest=today.addYears(2);
+        poisoned.days[history::Store::key(today,"p")]=history::Day{today,"p","p",7,3,.5};
+        poisoned.dirty=true; check(poisoned.save(error),"audit legacy future high fixture");
+        poisoned.load(today);
+        check(poisoned.newest==today.addYears(2) && poisoned.days.size()==1 && !poisoned.clockWarning.isEmpty(),"audit future high on disk is quarantined without pruning");
+        check(poisoned.confirmDate(today,error),"audit explicit legacy future high repair");
+        poisoned.add("p","p",r,wall,wall.addMSecs(500));
+        check(poisoned.newest==today && poisoned.totals("p",today,today).down==107,"audit no year-long rejection after explicit legacy repair");
+        QMap<QString,history::Day> result=poisoned.days; QDate high=today;
+        const auto resultBefore=result;
+        const QByteArray invalid="{\"version\":1,\"newest\":\"2099-01-01\",\"days\":[{}]}";
+        check(!history::Store::decode(invalid,result,high) && high==today && result.keys()==resultBefore.keys()
+            && result.first().down==resultBefore.first().down,"audit invalid decode commits neither output");
+        check(poisoned.save(error),"audit persist repaired legacy checkpoint");
+        const auto validBackup=bytes(poisoned.path+".bak");
+        QMap<QString,history::Day> backupRows; QDate backupHigh;
+        check(history::Store::decode(validBackup,backupRows,backupHigh),"audit valid backup fixture decoded");
+        check(history::Store::atomic(poisoned.path,invalid,error),"audit invalid future main fixture");
+        poisoned.load(today);
+        check(poisoned.newest==backupHigh && poisoned.days.size()==backupRows.size()
+            && poisoned.clockWarning.isEmpty(),"audit invalid future high cannot contaminate valid backup restoration");
+        check(history::Store::atomic(poisoned.path,invalid,error) && history::Store::atomic(poisoned.path+".bak",invalid,error),"audit both invalid future-high files fixture");
+        poisoned.load(today);
+        check(poisoned.newest==today && poisoned.days.isEmpty(),"audit both invalid files cannot poison fresh baseline");
+        check(HistoryChart::axisLabel(2e9)==QStringLiteral("2.00 GB") && !HistoryChart::axisLabel(2e12).contains("e+"),"audit fixed decimal GB axis without scientific notation");
+        history::Store chartStore; chartStore.load(); chartStore.addPart(QDate::currentDate(),"p","p",2000000000ULL,1000000000ULL,.5);
+        HistoryChart chart(&chartStore); chart.scope="p"; chart.resize(500,230);
+        if(!captures.isEmpty()) chart.grab().save(captures+"/audit-history-2GB.png");
+        chart.resize(60,230); check(!chart.grab().isNull(),"audit narrow history chart renders safely");
+        chart.count=0; check(!chart.grab().isNull(),"audit empty chart range safe");
+        // Real processSample path: session/CSV resume in the future, history stays quarantined.
+        w.timer.stop(); w.retentionTimer.stop(); w.clearStatistics(); w.paused=false;
+        w.historyStore=history::Store(dir.filePath("integration.json")); w.historyStore.load();
+        traffic::InterfaceInfo nic; nic.luid=456; nic.guid="{audit}"; nic.hardware=true; nic.up=true;
+        w.savedAdapter="physical"; w.updateAdapterList({nic});
+        const auto current=QDateTime(QDate::currentDate(),QTime(12,0),QTimeZone::systemTimeZone());
+        w.processSample({nic},true,mono,{},current); nic.inOctets=100;
+        w.processSample({nic},true,mono+std::chrono::milliseconds(500),{},current.addMSecs(500));
+        const auto checkpoint=w.historyStore.encode();
+        w.historyBlockedNotified=false;
+        nic.inOctets+=100; w.processSample({nic},true,mono+std::chrono::seconds(1),{},current.addYears(2));
+        nic.inOctets+=100; w.processSample({nic},true,mono+std::chrono::milliseconds(1500),{},current.addYears(2).addMSecs(500));
+        check(w.historyStore.encode()==checkpoint && w.session.down==200 && w.records.size()==2
+            && !w.confirmHistoryDate->isHidden(),"audit processSample retains real-time and CSV with visible date recovery action");
+        if(QSystemTrayIcon::isSystemTrayAvailable() && QSystemTrayIcon::supportsMessages()) {
+            check(w.historyBlockedNotified && !w.notifyHistoryBlocked(),"history block sends first tray notification and suppresses repeated samples");
+        }
+        nic.inOctets+=100; w.processSample({nic},true,mono+std::chrono::seconds(2),{},current.addSecs(2));
+        nic.inOctets+=100; w.processSample({nic},true,mono+std::chrono::milliseconds(2500),{},current.addMSecs(2500));
+        check(w.historyStore.clockWarning.isEmpty() && w.historyStore.totals("physical",current.date(),current.date()).down==200,"audit processSample returns to trusted clock");
+        check(!w.historyBlockedNotified,"history recovery resets tray notification latch");
+        w.historyStore.prune(current.date().addYears(-2));
+        check(w.notifyHistoryBlocked()==(QSystemTrayIcon::isSystemTrayAvailable() && QSystemTrayIcon::supportsMessages()),
+            "new blocking episode can send a fresh notification");
+        w.historyStore.prune(current.date()); w.refreshDisplay();
+        // An interval mismatch is visible text, never a date action or tray blockage.
+        w.historyStore.add("physical","Physical",r,current,current.addSecs(3600),mono+std::chrono::seconds(3));
+        w.refreshDisplay();
+        check(w.historyStore.clockWarning.isEmpty() && !w.historyStore.intervalWarning.isEmpty()
+            && w.confirmHistoryDate->isHidden() && !w.historyBlockedNotified && !w.notifyHistoryBlocked()
+            && w.note->text().contains(w.historyStore.intervalWarning),"interval mismatch shows text without date action or tray blockage");
+        w.historyStore.add("physical","Physical",r,current,current.addMSecs(500),mono+std::chrono::seconds(4));
+        w.refreshDisplay();
+        check(w.historyStore.intervalWarning.isEmpty(),"next valid sample clears interval notice");
+        // Drive date confirmation itself in the isolated settings/data fixture.
+        w.historyStore.prune(current.date().addYears(2)); w.refreshDisplay();
+        const auto beforeConfirm=w.historyStore.encode(); bool sawCancel=false;
+        QTimer::singleShot(50,&w,[&] {
+            if(auto *box=qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                sawCancel=true; check(box->defaultButton()==box->button(QMessageBox::Cancel),"audit date confirmation defaults to cancel");
+                if(!captures.isEmpty()) box->grab().save(captures+"/audit-date-confirm.png");
+                box->button(QMessageBox::Cancel)->click();
+            }
+        });
+        w.confirmHistoryDate->click();
+        check(sawCancel && w.historyStore.encode()==beforeConfirm && !w.historyStore.clockWarning.isEmpty(),"audit date confirmation cancellation keeps quarantine and all data");
+        QTimer::singleShot(50,&w,[&] { if(auto *box=qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click(); });
+        w.confirmHistoryDate->click();
+        check(w.historyStore.clockWarning.isEmpty() && w.confirmHistoryDate->isHidden(),"audit confirmed date recovery hides action and resumes");
+        w.historyStore.dirty=false; w.clearStatistics(); w.setPaused(true);
+        std::cout << "AUDIT: date quarantine, restart, explicit recovery snapshot, transactional decode and chart regression completed\n";
+    }
     static int miniRestored() {
         SpeedWindow window; window.timer.stop();
         check(window.mini->windowOpacity()>=.49 && window.mini->windowOpacity()<=.51
@@ -228,6 +497,7 @@ struct Verification {
         check(jan.down==501 && jan.up==101 && jan.seconds==.25,"monthly and year rollover totals");
         const QDateTime month(QDate(2026,1,31),QTime(23,59,59,500),QTimeZone::UTC);
         r.seconds=1; r.inBytes=2000; r.outBytes=1000;
+        store.anchor(month.date()); // synthetic month-long elapsed time in this fixture
         store.add("vpn","VPN",r,month,month.addSecs(1));
         check(store.totals("vpn",QDate(2026,2,1),QDate(2026,2,1)).down==1000
               && store.totals("physical",date,QDate(2026,2,1)).down==1001,"month rollover and scope isolation");
@@ -267,7 +537,7 @@ struct Verification {
               && QDir(dir.path()).entryList({"*.corrupt-*"},QDir::Files).size()==3,"both damaged files preserved and startup recovers empty");
         check(empty.save(error),"blank recovery state saves atomically");
         history::Store retention(dir.filePath("retention.json"));
-        for(int i=0;i<400;++i) { auto a=month.addDays(i); retention.add("p","p",r,a,a.addSecs(1)); }
+        for(int i=0;i<400;++i) { auto a=month.addDays(i); retention.anchor(a.date()); retention.add("p","p",r,a,a.addSecs(1)); }
         check(retention.days.size()==365,"history retention limited to 365 calendar days");
         const auto original=retention.encode(); retention.path=dir.filePath("block/child.json");
         QFile blocker(dir.filePath("block")); check(blocker.open(QIODevice::WriteOnly),"create write failure fixture"); blocker.close();
@@ -409,7 +679,7 @@ struct Verification {
         const QByteArray bytes = file.readAll(); file.close();
         check(bytes.startsWith(QByteArray::fromHex("efbbbf")) && bytes.contains("Download_Bps"), "CSV UTF-8 BOM and fixed header");
         check(bytes.contains(QStringLiteral("測試").toUtf8()) && bytes.contains("\"\"VPN\"\""), "CSV unicode and quotes escaped");
-        check(csvText("=1+1") == QStringLiteral("\"'=1+1\"") && csvText("  @SUM(1)").contains(QChar(0x27)),
+        check(history::csv("=1+1") == QStringLiteral("\"'=1+1\"") && history::csv("  @SUM(1)").contains(QChar(0x27)),
               "CSV formula-like names neutralized");
         check(!writeCsv(csv + "/missing.csv", w.records, error), "CSV path failure reported");
         QFile unchanged(csv); check(unchanged.open(QIODevice::ReadOnly), "read existing CSV after failure");
@@ -466,9 +736,9 @@ struct Verification {
             check(scroll->widget()->findChild<QLabel *>() != nullptr, "scroll content retained");
             if (!captureDir.isEmpty()) w.grab().save(captureDir + QString("/v121-%1x%2.png").arg(size.width()).arg(size.height()));
         }
-        check(csvText("\tname").startsWith("\"'") && csvText("\r=1").startsWith("\"'")
-              && csvText("\n+1").startsWith("\"'") && csvText(" \t@x").startsWith("\"'")
-              && csvText("ordinary") == "\"ordinary\"", "CSV controls and formulas escaped without changing ordinary text");
+        check(history::csv("\tname").startsWith("\"'") && history::csv("\r=1").startsWith("\"'")
+              && history::csv("\n+1").startsWith("\"'") && history::csv(" \t@x").startsWith("\"'")
+              && history::csv("ordinary") == "\"ordinary\"", "CSV controls and formulas escaped without changing ordinary text");
         const auto now = std::chrono::steady_clock::now();
         w.session.down = 987654321; w.session.seconds = 90000;
         w.records.push_back({"old", "adapter", "id", {}, w.session, now - std::chrono::hours(24)});
@@ -831,6 +1101,7 @@ struct Verification {
         verifyV121(window, captureDir);
         verifyV13(window, captureDir);
         verifyF10(captureDir);
+        verifyAudit(window,captureDir);
         window.session.down = 100;
         // 網卡選單：第一項是所有實體網卡、最後一項是全部介面；切換網卡會清空歷史並記住選擇
         check(window.adapterSelector->count() >= 2, "adapter selector populated");
@@ -886,6 +1157,7 @@ int main(int argc, char **argv) {
     app.setOrganizationName("RealtimeNetworkSpeed");
     app.setApplicationName("RealtimeNetworkSpeed");
     QSettings::setDefaultFormat(QSettings::IniFormat);
+    if(app.arguments().contains("--measure-csv")) return Verification::measureCsv(app.arguments().contains("--independent-strings"));
     if(app.arguments().size()==3 && app.arguments()[1]=="--f10-normal-exit") {
         QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,app.arguments()[2]);
         return Verification::f10NormalExit(app,app.arguments()[2]);
@@ -921,6 +1193,16 @@ int main(int argc, char **argv) {
     QTemporaryDir settings(QDir::currentPath() + "/settings-test-XXXXXX");
     check(settings.isValid(), "isolated preference directory");
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    if (app.arguments().size()==3 && app.arguments()[1]=="--packaged-smoke") {
+        SpeedWindow w; w.show();
+        check(displaySettings().fileName().startsWith(settings.path()),"packaged smoke uses isolated settings");
+        QTimer::singleShot(600,&app,[&] {
+            check(w.isVisible(),"packaged UI launches with deployed dependencies");
+            check(w.grab().save(app.arguments()[2]),"packaged UI screenshot");
+            app.exit(failures?1:0);
+        });
+        return app.exec();
+    }
     if (app.arguments().contains("--interactive-smoke")) return Verification::interactive(app);
     const QString captures = app.arguments().size() > 1 ? app.arguments()[1] : qEnvironmentVariable("RNS_TEST_CAPTURES");
     if (!captures.isEmpty()) QDir().mkpath(captures);

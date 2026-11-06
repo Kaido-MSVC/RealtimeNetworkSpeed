@@ -19,7 +19,7 @@ try {
     if (-not $qt) {
         # 只找 Qt 官方安裝版：授權說明與原始碼提供方式是依官方未修補的 Qt 寫的
         $qt = Get-ChildItem 'D:\qt', 'C:\Qt' -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^6\.\d+(\.\d+)?$' } |
+            Where-Object { $_.Name -match '^6\.12\.\d+$' } |
             Sort-Object { [version]$_.Name } -Descending |
             ForEach-Object { Join-Path $_.FullName 'msvc2022_64' } |
             Where-Object { Test-Path (Join-Path $_ 'lib\cmake\Qt6\Qt6Config.cmake') } |
@@ -29,7 +29,9 @@ try {
     # 發行包內的 Qt 版本必須與 licenses\授權說明.txt 一致
     $expectedQt = '6.12.0'
     $qtVersion = (& (Join-Path $qt 'bin\qtpaths6.exe') --qt-query QT_VERSION 2>$null | Select-Object -First 1)
-    if ($qtVersion -ne $expectedQt) { throw "Qt 版本是 $qtVersion，授權說明寫的是 $expectedQt；更新版本時要一併更新授權說明與 `$expectedQt" }
+    if ($qtVersion -notmatch '^6\.12\.\d+$') { throw "僅支援 Qt 6.12.x，目前為 $qtVersion" }
+    # 僅建置允許 6.12.x；打包仍須與既有授權材料所記錄的版本一致。
+    if (-not $BuildOnly -and $qtVersion -ne $expectedQt) { throw "Qt 版本是 $qtVersion，授權說明寫的是 $expectedQt；更新版本時要一併更新授權說明與 `$expectedQt" }
     if (Test-Path (Join-Path $qt 'bin\glib-2.0-0.dll')) { throw "$qt 不是 Qt 官方版（含 GLib），授權說明不適用" }
     Log "Qt：$qt"
     Log "PowerShell：$($PSVersionTable.PSVersion)"
@@ -46,7 +48,8 @@ try {
 
     # 打包到 dist（不覆寫 app\ 或已安裝的版本）
     $dist = Join-Path $root 'dist'
-    if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+    if ([IO.Path]::GetFullPath($dist) -ne [IO.Path]::Combine([IO.Path]::GetFullPath($root), 'dist')) { throw 'dist 路徑檢查失敗' }
+    if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
     New-Item -ItemType Directory -Path $dist | Out-Null
     $exe = Join-Path $dist 'RealtimeNetworkSpeed.exe'
     Copy-Item (Join-Path $build 'Release\RealtimeNetworkSpeed.exe') $exe
@@ -103,24 +106,21 @@ try {
         if (-not (Test-Path (Join-Path $dist $required))) { throw "打包缺少 $required" }
     }
 
-    # 模擬朋友的電腦：PATH 只留 Windows 系統資料夾，確認程式能啟動。
-    # SEM_FAILCRITICALERRORS 會傳給子程序：缺 DLL 時直接結束，不會跳出系統錯誤視窗卡住測試。
-    Add-Type -Namespace Win32 -Name ErrorMode -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);'
-    $oldMode = [Win32.ErrorMode]::SetErrorMode(0x0001)
+    # 以相同 UI 程式碼的驗證執行檔檢查部署；QSettings 全部隔離，不啟動使用者資料。
+    $smoke = Join-Path $root ('build/packaged-smoke-' + [guid]::NewGuid().ToString('N'))
+    if (Test-Path $smoke) { throw "請先保留或移除上次隔離驗證目錄：$smoke" }
+    Copy-Item $dist $smoke -Recurse
+    Copy-Item (Join-Path $build 'Release/RealtimeNetworkSpeedVerification.exe') $smoke
+    # 驗證程式另需 Qt Test，正式套件不附此 DLL。
+    Copy-Item (Join-Path $qt 'bin/Qt6Test.dll') $smoke
     $savedPath = $env:PATH
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     try {
-        $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
-        Start-Sleep -Seconds 3
-        $alive = -not $proc.HasExited
-        if ($alive) { Stop-Process -Id $proc.Id -Force }
-    }
-    finally {
-        $env:PATH = $savedPath
-        [void][Win32.ErrorMode]::SetErrorMode($oldMode)
-    }
-    if (-not $alive) { throw "在乾淨 PATH 下啟動失敗（結束代碼 $($proc.ExitCode)），可能缺少 DLL" }
-    Log '乾淨 PATH 啟動測試：通過（程式已自動關閉）'
+        Push-Location $smoke
+        try { Run (Join-Path $smoke 'RealtimeNetworkSpeedVerification.exe') @('--packaged-smoke', (Join-Path $build 'packaged-smoke.png')) }
+        finally { Pop-Location }
+    } finally { $env:PATH = $savedPath }
+    Log '乾淨 PATH 隔離 UI 啟動測試：通過（未開啟使用者設定或歷史）'
 
     # 測試全部通過才打包程式與原始碼壓縮檔（同一天重建會覆寫當天的壓縮檔，不動舊版壓縮檔）
     $archives = Join-Path $root 'archives'
@@ -156,10 +156,10 @@ try {
     # 原始碼：專案根目錄的 .cpp／.h 自動納入（不往下找，避免包進 build、backup 等資料夾）；
     # 其他建置需要的檔案列在下面，新增資源或設定檔時要一併加進清單
     $sourceFiles = @('main.cpp', 'CMakeLists.txt', 'RealtimeNetworkSpeed.pro', 'app.rc', 'app.ico',
-                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd')
+                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'RELEASE-v1.3.1.md')
     foreach ($file in $sourceFiles) { if (-not (Test-Path (Join-Path $root $file))) { throw "原始碼缺少 $file" } }
     $sourceFiles += Get-ChildItem $root -File | Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object Name
-    $sourceFiles += Get-RelativeFiles $root @('tests', 'licenses')
+    $sourceFiles += Get-RelativeFiles $root @('tests', 'licenses', 'installer')
     $sourceFiles = @($sourceFiles | Sort-Object -Unique)
     New-Archive (Join-Path $archives "RealtimeNetworkSpeed-v$appVersion-source-$stamp.zip") 'RealtimeNetworkSpeed-source' $root $sourceFiles
     Log "完成：$exe"

@@ -6,7 +6,14 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 
 作者：**Kaido-MSVC**。本程式完全在本機執行，不連網、不上傳任何資料。
 
-最新版本：**v1.3.0**（2026-11-06）。[正式下載與全部附件](https://github.com/Kaido-MSVC/RealtimeNetworkSpeed/releases/tag/v1.3.0)。
+最新版本：**v1.3.1**（2026-11-06）。[正式下載與全部附件](https://github.com/Kaido-MSVC/RealtimeNetworkSpeed/releases/tag/v1.3.1)。
+
+### v1.3.1 日期與歷史安全修補
+- 執行中日期大幅跳動暫停歷史累積／修剪，校正後自動恢復；也可確認目前日期。正常關機跨多日重啟可繼續累積。
+- 啟動日期前進超過 2 日且要修剪過期資料時，先在設定資料夾 `%APPDATA%\RealtimeNetworkSpeed` 建立 `traffic-history.json.date-recovery-*` 完整快照，成功後才修剪；手動確認日期也先建立快照。正常最多保留 3 份，清理失敗可能暫時超過並提示重試。
+- 快照失敗時保留原歷史、主檔與備份，下次取樣自動重試；日期確認的提交或備份異常有明確提示。快照可能保留已清除資料，請自行管理。不要在程式運行時直接覆寫歷史檔。
+- 真正日期／保存受阻發系統匣通知，同一段受阻通知一次，恢復後重設；Windows 必須支援並允許通知。取樣間隔不符僅略過該筆並顯示文字，不顯示日期確認按鈕或發送受阻通知。
+- 新增目前使用者安裝版，安裝／移除保留設定與歷史；升級前請退出舊版。詳見 [開發紀錄](DEVELOPMENT-v1.3.1.md) 與 [發布驗證](RELEASE-v1.3.1.md)。
 
 ### v1.3.0 全部功能版
 - 依監控範圍分開統計今日、本月與每日有效流量；「歷史流量」提供 7／30 天圖及 7／30 天／全部保留歷史 CSV。
@@ -68,8 +75,9 @@ CSV 新增欄位：`Retained_From,Retained_To,Retention_Hours,Retention_Max_Reco
 
 | 附件 | 內容 |
 | --- | --- |
-| `RealtimeNetworkSpeed-1.3.0-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
-| `RealtimeNetworkSpeed-1.3.0-source.zip` | 本程式原始碼，內容與 `v1.3.0` Tag 相同 |
+| `RealtimeNetworkSpeed-1.3.1-Windows-x64-Setup.exe` | 安裝目前使用者；不要求管理員。可從 Windows 已安裝應用程式移除，設定／歷史保留 |
+| `RealtimeNetworkSpeed-1.3.1-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
+| `RealtimeNetworkSpeed-1.3.1-source.zip` | 本程式原始碼，內容與 `v1.3.1` Tag 相同 |
 | `qtbase-everywhere-src-6.12.0.tar.xz` | 隨附 Qt DLL 的完整對應原始碼（Qt 官方原始碼包，未修改） |
 | `SHA256SUMS.txt` | 上述附件的 SHA-256 |
 
@@ -130,8 +138,10 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 1. 尋找 Qt（`QT_DIR` 環境變數 → `D:\qt\6.*\msvc2022_64` → `C:\Qt\6.*\msvc2022_64`），並確認版本為 6.12.0
 2. 在 `build\` 以 CMake 建置 Release（含測試）並執行 CTest
 3. 打包到 `dist\`：Qt DLL（Core／Gui／Widgets／Network 與用得到的外掛）、MSVC 執行階段 DLL、`qt.conf`、`licenses\`
-4. 以只含 Windows 系統資料夾的 PATH 啟動一次，進行基本啟動檢查（不等同乾淨 Windows 環境驗證）
+4. 以只含 Windows 系統資料夾的 PATH 啟動使用相同 UI 程式碼的驗證程式，隔離設定／歷史並保存截圖（不啟動正式 EXE、不等同乾淨 Windows 環境驗證）
 5. 以上都通過後，把 `dist\` 打包成 `archives\RealtimeNetworkSpeed-v<版本>-win64-<建置日期>.zip`，原始碼打包成 `archives\RealtimeNetworkSpeed-v<版本>-source-<建置日期>.zip`
+
+安裝版另外執行 `pwsh -File build-installer.ps1`（需 NSIS 3.13）；版本自 `version.h` 讀取，依 dist 檔案生成精確移除清單，不遞迴刪除安裝資料夾。正式原始碼附件使用發布提交的 `git archive`。
 
 輸出同時寫入 `build-log.txt`。同一天重建會覆寫當天的壓縮檔；建置或測試失敗時不會產生壓縮檔。原始碼壓縮檔會納入根目錄的 `.cpp`／`.h` 與 `tests\`、`licenses\`；其他建置需要的檔案列在腳本的 `$sourceFiles`，新增時要一併加進清單。
 
