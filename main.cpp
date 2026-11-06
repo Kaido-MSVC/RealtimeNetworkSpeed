@@ -17,11 +17,20 @@
 #include <iphlpapi.h>
 
 #include <QApplication>
+#include <QScrollArea>
+#include <QScreen>
+#include <QLockFile>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QCryptographicHash>
+#include <QElapsedTimer>
+#include <QThread>
 #include <QDateTime>
 #include <QDialog>
 #include <QPlainTextEdit>
 #include <QFileDialog>
 #include <QSaveFile>
+#include <QFileInfo>
 #include <QNetworkInterface>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -55,6 +64,7 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <deque>
 
 #include "traffic.h"
 #include "version.h"
@@ -156,28 +166,35 @@ struct CsvRecord {
     QString timestamp, adapter, key;
     traffic::Rates rates;
     traffic::Session session;
+    std::chrono::steady_clock::time_point recordedAt = std::chrono::steady_clock::now();
 };
 
 static QString csvText(QString value) {
     const QString trimmed = value.trimmed();
-    if (!trimmed.isEmpty() && QStringLiteral("=+-@").contains(trimmed.front())) value.prepend(QChar(0x27));
+    const bool control = std::any_of(value.begin(), value.end(), [](QChar c) {
+        return c.unicode() < 0x20 || c.unicode() == 0x7f;
+    });
+    if (control || (!trimmed.isEmpty() && QStringLiteral("=+-@").contains(trimmed.front())))
+        value.prepend(QChar(0x27));
     value.replace(QLatin1String("\""), QLatin1String("\"\""));
     return QLatin1Char('"') + value + QLatin1Char('"');
 }
 
-static bool writeCsv(const QString &path, const std::vector<CsvRecord> &records, QString &error) {
+static bool writeCsv(const QString &path, const std::deque<CsvRecord> &records, QString &error, quint64 discarded = 0) {
     QSaveFile file(path); // default: no direct-write fallback, preserve existing file on failure
     if (!file.open(QIODevice::WriteOnly)) { error = file.errorString(); return false; }
     auto write = [&](const QByteArray &bytes) { return file.write(bytes) == bytes.size(); };
     bool ok = write(QByteArray::fromHex("efbbbf")) && write(
-        "Timestamp,Adapter,Download_Bps,Upload_Bps,Total_Download,Total_Upload,Adapter_ID,Sample_Seconds,Active_Seconds,Average_Download_Bps,Average_Upload_Bps,Peak_Download_Bps,Peak_Upload_Bps\r\n");
+        "Timestamp,Adapter,Download_Bps,Upload_Bps,Total_Download,Total_Upload,Adapter_ID,Sample_Seconds,Active_Seconds,Average_Download_Bps,Average_Upload_Bps,Peak_Download_Bps,Peak_Upload_Bps,Retained_From,Retained_To,Retention_Hours,Retention_Max_Records,Discarded_Records\r\n");
     for (const auto &r : records) {
         if (!ok) break;
         const auto n = [](double value) { return QString::number(value, 'g', 17); };
         const QStringList fields = {csvText(r.timestamp), csvText(r.adapter), n(r.rates.down / 8), n(r.rates.up / 8),
             QString::number(qulonglong(r.session.down)), QString::number(qulonglong(r.session.up)), csvText(r.key),
             n(r.rates.seconds), n(r.session.seconds), n(r.session.averageDown() / 8), n(r.session.averageUp() / 8),
-            n(r.session.peakDown / 8), n(r.session.peakUp / 8)};
+            n(r.session.peakDown / 8), n(r.session.peakUp / 8),
+            csvText(records.front().timestamp), csvText(records.back().timestamp),
+            QStringLiteral("24"), QStringLiteral("172800"), QString::number(discarded)};
         ok = write((fields.join(QLatin1Char(',')) + QStringLiteral("\r\n")).toUtf8());
     }
     if (!ok) { error = file.errorString(); file.cancelWriting(); return false; }
@@ -191,7 +208,7 @@ public:
     static constexpr int capacity = 120;
 
     explicit SpeedChart(QWidget *parent = nullptr) : QWidget(parent) {
-        setMinimumHeight(230);
+        setMinimumHeight(180);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setAutoFillBackground(true);
         QPalette p = palette();
@@ -299,10 +316,19 @@ public:
         setWindowTitle(QStringLiteral("即時網路速度"));
         setWindowIcon(QIcon(QStringLiteral(":/app.ico")));
         resize(850, 760);
-        setMinimumSize(760, 720);
+        setMinimumSize(420, 300);
         setStyleSheet(QStringLiteral("QWidget { background:#f3f6fb; color:#172033; font-family:'Microsoft JhengHei UI'; }"));
 
-        auto *layout = new QVBoxLayout(this);
+        auto *outer = new QVBoxLayout(this);
+        outer->setContentsMargins(0, 0, 0, 12);
+        auto *scroll = new QScrollArea(this);
+        scroll->setObjectName(QStringLiteral("contentScroll"));
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        auto *content = new QWidget;
+        scroll->setWidget(content);
+        outer->addWidget(scroll, 1);
+        auto *layout = new QVBoxLayout(content);
         layout->setContentsMargins(26, 22, 26, 18);
         layout->setSpacing(10);
 
@@ -408,7 +434,14 @@ public:
         });
         connect(adapterSelector, &QComboBox::currentIndexChanged, this, [this](int index) {
             if (index < 0) return;
-            savedAdapter = adapterSelector->itemData(index).toString();
+            const QString requested = adapterSelector->itemData(index).toString();
+            // Revert before entering any nested dialog: sampling must keep its old scope.
+            { const QSignalBlocker blocker(adapterSelector);
+              adapterSelector->setCurrentIndex(adapterSelector->findData(savedAdapter)); }
+            if (!confirmDiscard(QStringLiteral("切換網卡範圍"))) return;
+            { const QSignalBlocker blocker(adapterSelector);
+              adapterSelector->setCurrentIndex(adapterSelector->findData(requested)); }
+            savedAdapter = requested;
             savePreference(QStringLiteral("display/adapter"), savedAdapter);
             // 換網卡後舊的歷史屬於另一張網卡，清空重新累積
             clearStatistics();
@@ -431,7 +464,11 @@ public:
         statsLabel = new QLabel;
         statsLabel->setWordWrap(true);
         layout->addWidget(statsLabel);
+        retentionLabel = new QLabel;
+        retentionLabel->setWordWrap(true);
+        layout->addWidget(retentionLabel);
         auto *actions = new QHBoxLayout;
+        actions->setContentsMargins(16, 0, 16, 0);
         pauseButton = new QPushButton(QStringLiteral("暫停監控"));
         pauseButton->setObjectName(QStringLiteral("pauseButton"));
         auto *reset = new QPushButton(QStringLiteral("清空本次統計"));
@@ -442,7 +479,7 @@ public:
         actions->addWidget(reset);
         actions->addStretch();
         actions->addWidget(exportButton);
-        layout->addLayout(actions);
+        outer->addLayout(actions);
         connect(pauseButton, &QPushButton::clicked, this, [this] { setPaused(!paused); });
         connect(exportButton, &QPushButton::clicked, this, [this] { exportCsv(); });
         // No Qt parent/native owner: main-window minimize/hide cannot hide mini.
@@ -460,9 +497,9 @@ public:
         miniLayout->addWidget(miniValue);
         auto *restore = new QPushButton(QStringLiteral("還原主視窗"));
         miniLayout->addWidget(restore);
-        connect(restore, &QPushButton::clicked, this, [this] { showNormal(); raise(); activateWindow(); });
-        connect(miniButton, &QPushButton::clicked, this, [this] { mini->show(); });
-        connect(reset, &QPushButton::clicked, this, [this] { clearStatistics(); });
+        connect(restore, &QPushButton::clicked, this, [this] { activate(); });
+        connect(miniButton, &QPushButton::clicked, this, [this] { ensureVisible(mini); mini->show(); });
+        connect(reset, &QPushButton::clicked, this, [this] { if (confirmDiscard(QStringLiteral("清空本次統計"))) clearStatistics(); });
         connect(topmost, &QCheckBox::toggled, this, [this](bool on) {
             savePreference("display/topmost", on);
             applyTopmost(on);
@@ -470,24 +507,86 @@ public:
         connect(closeToTray, &QCheckBox::toggled, this, [this](bool on) { savePreference("display/closeToTray", on); });
         tray = new QSystemTrayIcon(windowIcon(), this);
         auto *menu = new QMenu(this);
-        menu->addAction(QStringLiteral("還原"), this, [this] { showNormal(); raise(); activateWindow(); });
+        menu->addAction(QStringLiteral("還原"), this, [this] { activate(); });
         menu->addAction(QStringLiteral("結束"), qApp, &QApplication::quit);
         tray->setContextMenu(menu);
         connect(tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
-            if (reason == QSystemTrayIcon::DoubleClick) { showNormal(); raise(); activateWindow(); }
+            if (reason == QSystemTrayIcon::DoubleClick || reason == QSystemTrayIcon::Trigger) { activate(); }
         });
         tray->show();
         applyTopmost(topmost->isChecked());
 
+        mini->adjustSize();
+        restoreWindows();
+        connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { saveWindows(); });
+        connect(&retentionTimer, &QTimer::timeout, this, [this] {
+            pruneRecords(std::chrono::steady_clock::now()); refreshDisplay();
+        });
+        retentionTimer.start(60000);
         refreshDisplay();
         connect(&timer, &QTimer::timeout, this, [this] { sample(); });
         timer.start(500);
         sample();
     }
 
-    ~SpeedWindow() override { delete mini; }
+    ~SpeedWindow() override { saveWindows(); delete mini; }
+
+    void activate() {
+        ensureVisible(this);
+        showNormal(); raise(); activateWindow();
+        if (auto *dialog = QApplication::activeModalWidget()) { dialog->raise(); dialog->activateWindow(); }
+    }
 
 private:
+    // Scope guards keep dialogs/export stable without copying the entire record buffer.
+    struct SamplingGuard {
+        SpeedWindow &w;
+        bool running;
+        explicit SamplingGuard(SpeedWindow &window) : w(window), running(w.timer.isActive()) { w.timer.stop(); }
+        ~SamplingGuard() { if (running && !w.paused) { w.hasPrevious = false; w.timer.start(500); } }
+    };
+
+    static void ensureVisible(QWidget *w) {
+        QScreen *screen = QGuiApplication::screenAt(w->frameGeometry().center());
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (!screen || w->isMaximized()) return;
+        const QRect area = screen->availableGeometry();
+        w->resize(w->size().boundedTo(QSize(std::max(1, area.width() - 24), std::max(1, area.height() - 48))));
+        const QRect frame = w->frameGeometry();
+        w->move(w->pos() + QPoint(std::clamp(frame.x(), area.left(), std::max(area.left(), area.right() - frame.width() + 1)) - frame.x(),
+                                 std::clamp(frame.y(), area.top(), std::max(area.top(), area.bottom() - frame.height() + 1)) - frame.y()));
+    }
+    void restoreWindows() {
+        auto settings = displaySettings();
+        restoreGeometry(settings.value("window/mainGeometry").toByteArray());
+        mini->restoreGeometry(settings.value("window/miniGeometry").toByteArray());
+        ensureVisible(this); ensureVisible(mini);
+    }
+    void saveWindows() {
+        if (!mini) return;
+        savePreference("window/mainGeometry", saveGeometry());
+        savePreference("window/miniGeometry", mini->saveGeometry());
+    }
+    static constexpr size_t recordLimit = 172800;
+    void pruneRecords(std::chrono::steady_clock::time_point now) {
+        while (!records.empty() && (records.size() > recordLimit || now - records.front().recordedAt >= std::chrono::hours(24))) {
+            records.pop_front(); ++discardedRecords;
+        }
+    }
+    bool confirmDiscard(const QString &action) {
+        if (!unexportedRecords) return true;
+        SamplingGuard guard(*this);
+        QMessageBox box(QMessageBox::Warning, action,
+            QStringLiteral("這會清除本次累積統計及尚未匯出的逐筆紀錄。\n逐筆只保留最近 24 小時（最多 172800 筆），較舊資料無法復原。"),
+            QMessageBox::NoButton, this);
+        auto *save = box.addButton(QStringLiteral("先匯出再繼續"), QMessageBox::AcceptRole);
+        auto *discard = box.addButton(QStringLiteral("捨棄並繼續"), QMessageBox::DestructiveRole);
+        auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        box.setDefaultButton(cancel); box.setEscapeButton(cancel);
+        box.exec();
+        if (box.clickedButton() == save) return exportCsv();
+        return box.clickedButton() == discard;
+    }
     QLabel *addCard(QHBoxLayout *layout, const QString &caption, const QString &accent) {
         auto *card = new QWidget;
         card->setStyleSheet(QStringLiteral("background:white;border:1px solid #dce4ef;"));
@@ -622,6 +721,7 @@ private:
 
     void processSample(std::vector<traffic::InterfaceInfo> infos, bool ok, SpeedChart::Time now, const QString &error = {}) {
         if (paused) return;
+        pruneRecords(now);
         if (!ok) {
             status->setText(error + QStringLiteral("（將自動重試）"));
             const double gap = std::numeric_limits<double>::quiet_NaN();
@@ -652,7 +752,9 @@ private:
                 for (const auto &i : lastInfos) if (i.guid == scope.guid) { name = adapterName(i); break; }
             const auto timestamp = QDateTime::currentDateTime();
             records.push_back({timestamp.toOffsetFromUtc(timestamp.offsetFromUtc()).toString(Qt::ISODateWithMs),
-                name, adapterSelector->currentData().toString(), rates, session});
+                name, adapterSelector->currentData().toString(), rates, session, now});
+            unexportedRecords = true;
+            pruneRecords(now);
         }
         currentDown = rates.down;
         currentUp = rates.up;
@@ -684,6 +786,8 @@ private:
         tray->setToolTip(QStringLiteral("%1\n↓ %2　↑ %3").arg(paused ? QStringLiteral("已暫停") : QStringLiteral("監看中"), downloadValue->text(), uploadValue->text()));
         mini->setWindowTitle(paused ? QStringLiteral("即時網速（已暫停）") : QStringLiteral("即時網速"));
         exportButton->setEnabled(!records.empty());
+        retentionLabel->setText(QStringLiteral("CSV：最近 24 小時，最多 172800 筆；目前 %1 筆，已淘汰 %2 筆。累積統計不受影響。")
+            .arg(records.size()).arg(discardedRecords));
         chart->setUnit(display);
         QString text = QStringLiteral("%1；每 0.5 秒更新。1 KB/s = 8 Kbps，1 MB/s = 8 Mbps（十進位）。")
             .arg(selected == SpeedUnit::Auto ? QStringLiteral("自動：依目前速度及 60 秒峰值統一單位")
@@ -696,6 +800,8 @@ private:
     void clearStatistics() {
         session = {};
         records.clear();
+        discardedRecords = 0;
+        unexportedRecords = false;
         chart->clear();
         currentDown = currentUp = 0;
         hasPrevious = false;
@@ -768,17 +874,33 @@ private:
         box.exec();
     }
 
-    void exportCsv() {
-        // Freeze the snapshot before the native save dialog's nested event loop.
-        const auto snapshot = records;
-        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("匯出本次監控紀錄"),
+    bool exportCsv() {
+        SamplingGuard guard(*this);
+        pruneRecords(std::chrono::steady_clock::now());
+        if (records.empty()) {
+            QMessageBox::information(this, QStringLiteral("匯出 CSV"), QStringLiteral("目前沒有保留範圍內的紀錄可匯出。"));
+            return false;
+        }
+        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("匯出最近 24 小時保留紀錄"),
             QStringLiteral("網速統計-%1.csv").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))),
             QStringLiteral("CSV 檔案 (*.csv)"));
-        if (path.isEmpty()) return;
+        if (path.isEmpty()) return false;
+        pruneRecords(std::chrono::steady_clock::now());
+        if (records.empty()) {
+            QMessageBox::information(this, QStringLiteral("匯出 CSV"), QStringLiteral("保留紀錄已超過 24 小時，沒有可匯出的資料。"));
+            return false;
+        }
+        // No nested event loop during writing; the deque is stable on the UI thread.
         QString error;
-        if (!writeCsv(path, snapshot, error))
+        if (!writeCsv(path, records, error, discardedRecords)) {
             QMessageBox::warning(this, QStringLiteral("匯出失敗"), QStringLiteral("無法儲存 CSV：%1").arg(error));
-        else QMessageBox::information(this, QStringLiteral("匯出完成"), QStringLiteral("已儲存 %1 筆紀錄至\n%2").arg(snapshot.size()).arg(path));
+            return false;
+        }
+        unexportedRecords = false;
+        QMessageBox::information(this, QStringLiteral("匯出完成"),
+            QStringLiteral("已儲存 %1 筆保留紀錄（已淘汰 %2 筆）\n範圍：%3 至 %4\n累積欄位包含本次全部有效取樣。\n%5")
+                .arg(records.size()).arg(discardedRecords).arg(records.front().timestamp, records.back().timestamp, path));
+        return true;
     }
 
     void applyTopmost(bool on) {
@@ -798,6 +920,7 @@ private:
         }
     }
     void closeEvent(QCloseEvent *event) override {
+        saveWindows();
         if (closeToTray->isChecked() && QSystemTrayIcon::isSystemTrayAvailable()) {
             hide(); event->ignore();
         } else {
@@ -805,7 +928,11 @@ private:
         }
     }
     bool paused = false;
-    std::vector<CsvRecord> records;
+    std::deque<CsvRecord> records;
+    quint64 discardedRecords = 0;
+    bool unexportedRecords = false;
+    QTimer retentionTimer;
+    QLabel *retentionLabel = nullptr;
     QLabel *statsLabel = nullptr;
     QPushButton *pauseButton = nullptr;
     QPushButton *exportButton = nullptr;
@@ -832,7 +959,63 @@ private:
     bool saveFailed = false;
     std::chrono::steady_clock::time_point previousTime;
     bool hasPrevious = false;
-    bool sampleValid = true;
+    bool sampleValid = false;
+};
+
+class SingleInstance {
+public:
+    explicit SingleInstance(const QString &settingsPath)
+        : lock(settingsPath + QStringLiteral(".instance.lock")),
+          name(QStringLiteral("RealtimeNetworkSpeed-") + QString::fromLatin1(
+              QCryptographicHash::hash(settingsPath.toLower().toUtf8(), QCryptographicHash::Sha256).toHex())) {
+        QDir().mkpath(QFileInfo(settingsPath).absolutePath());
+        lock.setStaleLockTime(0); // A long-running process must never lose its lock by age.
+    }
+    // 1: owner, 0: original window notified, -1: fail closed.
+    int start() {
+        if (lock.tryLock(0)) {
+            server.setSocketOptions(QLocalServer::UserAccessOption);
+            if (!server.listen(name)) return -1;
+            return 1;
+        }
+        QElapsedTimer deadline; deadline.start();
+        while (deadline.elapsed() < 3000) {
+            QLocalSocket client;
+            client.connectToServer(name);
+            if (client.waitForConnected(150) && (client.canReadLine() || client.waitForReadyRead(300))) {
+                bool ok = false;
+                const auto pid = client.readLine().trimmed().toULong(&ok);
+                if (ok) {
+                    AllowSetForegroundWindow(pid);
+                    client.write("activate\n");
+                    if ((client.bytesToWrite() == 0 || client.waitForBytesWritten(300))
+                        && (client.canReadLine() || client.waitForReadyRead(500))
+                        && client.readLine() == "ok\n") return 0;
+                }
+            }
+            QThread::msleep(50);
+        }
+        return -1;
+    }
+    void onActivation(SpeedWindow &window) {
+        QObject::connect(&server, &QLocalServer::newConnection, &window, [this, &window] {
+            while (auto *socket = server.nextPendingConnection()) {
+                QObject::connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                QObject::connect(socket, &QLocalSocket::readyRead, &window, [socket, &window] {
+                    if (!socket->canReadLine()) return;
+                    if (socket->readLine(32) == "activate\n") { window.activate(); socket->write("ok\n"); socket->flush(); }
+                    socket->disconnectFromServer();
+                });
+                socket->write(QByteArray::number(QCoreApplication::applicationPid()) + "\n");
+                socket->flush();
+                QTimer::singleShot(5000, socket, [socket] { socket->abort(); socket->deleteLater(); });
+            }
+        });
+    }
+private:
+    QLockFile lock;
+    QString name;
+    QLocalServer server;
 };
 
 int main(int argc, char *argv[])
@@ -840,7 +1023,16 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("RealtimeNetworkSpeed"));
     QCoreApplication::setApplicationName(QStringLiteral("RealtimeNetworkSpeed"));
+    SingleInstance instance(displaySettings().fileName());
+    const int state = instance.start();
+    if (state == 0) return 0;
+    if (state < 0) {
+        QMessageBox::warning(nullptr, QStringLiteral("即時網路速度"),
+            QStringLiteral("無法取得單一執行個體鎖定，或原視窗暫時未回應。請稍後再試。"));
+        return 1;
+    }
     SpeedWindow window;
+    instance.onActivation(window);
     window.show();
     return app.exec();
 }

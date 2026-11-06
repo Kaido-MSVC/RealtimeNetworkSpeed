@@ -1,4 +1,5 @@
-﻿# 建置、測試並打包「即時網路速度」。輸出同時寫入 build-log.txt。
+﻿param([switch]$Pause, [switch]$NoPause, [switch]$BuildOnly)
+# 建置、測試並打包「即時網路速度」。輸出同時寫入 build-log.txt。
 # 可用環境變數 QT_DIR 指定 Qt（例如 C:\Qt\6.12.0\msvc2022_64）。
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -40,6 +41,8 @@ try {
 
     $env:PATH = (Join-Path $qt 'bin') + ';' + $env:PATH
     Run 'ctest' @('--test-dir', $build, '-C', 'Release', '--output-on-failure')
+
+    if ($BuildOnly) { Log '僅建置與測試完成；未打包'; exit 0 }
 
     # 打包到 dist（不覆寫 app\ 或已安裝的版本）
     $dist = Join-Path $root 'dist'
@@ -166,6 +169,6 @@ catch {
     Log "失敗：$_"
 }
 Log "=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 結束（$(if ($failed) { '失敗' } else { '成功' })）"
-Read-Host '按 Enter 關閉視窗'
+if ($Pause -and -not $NoPause -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) { Read-Host '按 Enter 關閉視窗' }
 if ($failed) { exit 1 }
 exit 0

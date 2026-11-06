@@ -6,6 +6,7 @@
 #include <QProcess>
 #include <QDir>
 #include <QPointer>
+#include <QScrollBar>
 #include <iostream>
 
 static int failures = 0;
@@ -97,6 +98,7 @@ struct Verification {
             w.resize(w.minimumSize()); QTest::qWait(50);
             w.grab().save(captureDir + "/v1.2-minimum.png");
         }
+        w.unexportedRecords = false;
         w.adapterSelector->setCurrentIndex(0);
         const auto baselineInfos = w.lastInfos;
         QTimer::singleShot(100, &w, [&] {
@@ -125,6 +127,145 @@ struct Verification {
         w.mini->hide();
     }
 
+    static void verifyV121(SpeedWindow &w, const QString &captureDir) {
+        w.timer.stop(); w.clearStatistics(); w.showNormal();
+        auto *scroll = w.findChild<QScrollArea *>("contentScroll");
+        for (const QSize size : {QSize(850, 560), QSize(640, 420), QSize(420, 300)}) {
+            w.resize(size); QTest::qWait(80);
+            check(scroll && scroll->verticalScrollBar()->maximum() > 0, "small window content scrolls");
+            for (auto *button : {w.pauseButton, w.exportButton, w.findChild<QPushButton *>("resetButton")}) {
+                const QRect rect(button->mapTo(&w, QPoint()), button->size());
+                check(w.rect().contains(rect) && button->isVisible(), "all footer actions remain in viewport");
+            }
+            scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+            check(scroll->widget()->findChild<QLabel *>() != nullptr, "scroll content retained");
+            if (!captureDir.isEmpty()) w.grab().save(captureDir + QString("/v121-%1x%2.png").arg(size.width()).arg(size.height()));
+        }
+        check(csvText("\tname").startsWith("\"'") && csvText("\r=1").startsWith("\"'")
+              && csvText("\n+1").startsWith("\"'") && csvText(" \t@x").startsWith("\"'")
+              && csvText("ordinary") == "\"ordinary\"", "CSV controls and formulas escaped without changing ordinary text");
+        const auto now = std::chrono::steady_clock::now();
+        w.session.down = 987654321; w.session.seconds = 90000;
+        w.records.push_back({"old", "adapter", "id", {}, w.session, now - std::chrono::hours(24)});
+        w.records.push_back({"recent", "adapter", "id", {}, w.session, now});
+        w.unexportedRecords = true;
+        w.pruneRecords(now);
+        check(w.records.size() == 1 && w.records.front().timestamp == "recent" && w.discardedRecords == 1,
+              "24h retention expires oldest record at exact boundary");
+        check(w.session.down == 987654321 && w.session.seconds == 90000 && w.unexportedRecords,
+              "retention preserves session totals and unsaved state");
+        while (w.records.size() <= w.recordLimit) w.records.push_back({"recent", "adapter", "id", {}, w.session, now});
+        w.pruneRecords(now);
+        check(w.records.size() == w.recordLimit && w.discardedRecords == 2, "record cap enforced independently of elapsed time");
+        w.records.erase(w.records.begin() + 1, w.records.end());
+        QString error;
+        QTemporaryDir csvDir;
+        const QString path = csvDir.filePath("retained.csv");
+        check(writeCsv(path, w.records, error, w.discardedRecords), "retained range export succeeds");
+        QFile file(path); check(file.open(QIODevice::ReadOnly), "retention export readable");
+        const auto bytes = file.readAll();
+        check(bytes.contains("Retained_From,Retained_To,Retention_Hours,Retention_Max_Records,Discarded_Records")
+              && bytes.contains("987654321") && bytes.contains("24,172800,2"), "CSV distinguishes cumulative totals and retained range");
+        const auto oldKey = w.savedAdapter;
+        const auto oldTotal = w.session.down;
+        const int target = w.adapterSelector->currentIndex() == 0 ? w.adapterSelector->count()-1 : 0;
+        auto answer = [](bool discard) {
+            QTimer::singleShot(50, qApp, [discard] {
+                auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+                check(box && box->defaultButton() && box->defaultButton()->text() == QStringLiteral("取消"), "discard prompt defaults to cancel");
+                if (box) {
+                    if (discard) { for (auto *b : box->buttons()) if (box->buttonRole(b) == QMessageBox::DestructiveRole) { b->click(); return; } }
+                    box->defaultButton()->click();
+                }
+            });
+        };
+        answer(false); w.adapterSelector->setCurrentIndex(target);
+        check(w.savedAdapter == oldKey && w.adapterSelector->currentData().toString() == oldKey
+              && w.session.down == oldTotal && w.records.size() == 1, "cancel adapter change preserves old selection totals records");
+        answer(false); w.findChild<QPushButton *>("resetButton")->click();
+        check(w.session.down == oldTotal && w.unexportedRecords, "cancel reset preserves data");
+        // Exercise save-before-discard with controlled Qt dialogs and real atomic writes.
+        const bool wasNativeDisabled = QCoreApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+        QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+        auto saveBefore = [&](bool cancelSave) {
+            QTimer dialogDriver;
+            QObject::connect(&dialogDriver, &QTimer::timeout, &w, [&] {
+                QWidget *active = QApplication::activeModalWidget();
+                if (auto *fileDialog = qobject_cast<QFileDialog *>(active)) {
+                    check(!w.timer.isActive() && w.savedAdapter == oldKey, "save dialog holds old scope and sampling");
+                    if (cancelSave) fileDialog->reject();
+                    else { fileDialog->selectFile(csvDir.filePath("saved-before-reset.csv"));
+                           QMetaObject::invokeMethod(fileDialog, "accept", Qt::DirectConnection); }
+                } else if (auto *box = qobject_cast<QMessageBox *>(active)) {
+                    if (box->windowTitle() == QStringLiteral("匯出完成")) box->accept();
+                    else for (auto *b : box->buttons())
+                        if (box->buttonRole(b) == QMessageBox::AcceptRole) { b->click(); break; }
+                }
+            });
+            dialogDriver.start(40);
+            w.adapterSelector->setCurrentIndex(target);
+        };
+        saveBefore(true);
+        check(w.savedAdapter == oldKey && w.session.down == oldTotal && w.unexportedRecords,
+              "cancel save-before-switch cancels switch and retains unsaved data");
+        saveBefore(false);
+        const auto exportedFiles = QDir(csvDir.path()).entryList({"*.csv"}, QDir::Files);
+        check(w.records.empty() && w.session.down == 0 && w.savedAdapter != oldKey
+              && exportedFiles.size() == 2, "successful save-before-switch exports then switches");
+        for (const auto &name : exportedFiles) if (name != "retained.csv") {
+            QFile saved(csvDir.filePath(name));
+            check(saved.open(QIODevice::ReadOnly) && saved.readAll().contains("987654321"), "save-before-switch preserves original cumulative data in CSV");
+        }
+        QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, wasNativeDisabled);
+        // Recreate unsaved data for explicit discard branch.
+        w.adapterSelector->setCurrentIndex(w.adapterSelector->findData(oldKey));
+        w.records.push_back({"recent", "adapter", "id", {}, {}, now}); w.unexportedRecords = true;
+        answer(true); w.adapterSelector->setCurrentIndex(target);
+        check(w.session.down == 0 && w.records.empty() && !w.unexportedRecords && w.savedAdapter != oldKey,
+              "explicit discard switches adapter and resets statistics");
+        w.records.push_back({"test", "adapter", "id", {}, {}, now}); w.unexportedRecords = true;
+        answer(true); w.findChild<QPushButton *>("resetButton")->click();
+        check(w.records.empty() && !w.unexportedRecords, "explicit reset discards after confirmation");
+        w.hide(); emit w.tray->activated(QSystemTrayIcon::Trigger); QTest::qWait(80);
+        check(nativeVisible(&w), "single tray click restores native window");
+        w.resize(740, 510); w.move(90, 90); w.mini->resize(310, 170); w.mini->move(130, 130);
+        w.saveWindows();
+        const auto mainGeometry = w.geometry(), miniGeometry = w.mini->geometry();
+        const QString expectedPath = csvDir.filePath("geometry.ini");
+        { QSettings expected(expectedPath, QSettings::IniFormat);
+          expected.setValue("main", mainGeometry); expected.setValue("mini", miniGeometry); expected.sync(); }
+        QProcess geometryChild;
+        geometryChild.start(QCoreApplication::applicationFilePath(), {"--check-geometry", QFileInfo(displaySettings().fileName()).absolutePath() + "/..", expectedPath});
+        check(geometryChild.waitForFinished(10000) && geometryChild.exitCode() == 0, "geometry restored in fresh process");
+        if (geometryChild.exitCode() != 0) std::cerr << geometryChild.readAllStandardError().constData();
+        w.resize(850, 700); w.move(200, 200); w.mini->move(250, 250); w.restoreWindows();
+        check(w.geometry() == mainGeometry && w.mini->geometry() == miniGeometry, "main and mini geometry restored");
+        w.move(-30000, -30000); w.mini->move(30000, 30000);
+        SpeedWindow::ensureVisible(&w); SpeedWindow::ensureVisible(w.mini);
+        check(QGuiApplication::primaryScreen()->availableGeometry().contains(w.frameGeometry())
+              && QGuiApplication::primaryScreen()->availableGeometry().contains(w.mini->frameGeometry()),
+              "offscreen windows clamped to available desktop");
+        QTemporaryDir instanceDir;
+        const QString identity = instanceDir.filePath("instance.ini");
+        SingleInstance owner(identity);
+        check(owner.start() == 1, "single instance lock acquired");
+        owner.onActivation(w); w.hide();
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--check-instance", identity});
+        QElapsedTimer deadline; deadline.start();
+        while (child.state() != QProcess::NotRunning && deadline.elapsed() < 6000) QTest::qWait(20);
+        check(child.state() == QProcess::NotRunning && child.exitCode() == 0 && nativeVisible(&w),
+              "second process exits and wakes existing window");
+        if (child.state() != QProcess::NotRunning) { child.kill(); child.waitForFinished(); }
+        w.clearStatistics(); w.adapterSelector->setCurrentIndex(0);
+    }
+
+    static int interactive(QApplication &app) {
+        SpeedWindow w;
+        w.show();
+        QTimer::singleShot(180000, &app, &QCoreApplication::quit);
+        return app.exec();
+    }
     static bool nativeVisible(QWidget *widget) {
         const auto hwnd = reinterpret_cast<HWND>(widget->winId());
         return IsWindowVisible(hwnd) && !IsIconic(hwnd);
@@ -159,6 +300,13 @@ struct Verification {
         check(quitting, "application exits through event loop");
         return result || failures ? 1 : 0;
     }
+    static int geometryRestored(const QString &expectedPath) {
+        QSettings expected(expectedPath, QSettings::IniFormat);
+        SpeedWindow w;
+        check(w.geometry() == expected.value("main").toRect() && w.mini->geometry() == expected.value("mini").toRect(),
+              "main and mini geometry persist across process restart");
+        return failures ? 1 : 0;
+    }
     static int restored(int expected) {
         SpeedWindow window;
         if (window.unitSelector->currentIndex() != expected)
@@ -183,6 +331,8 @@ struct Verification {
         SpeedWindow window;
         check(window.timer.interval() == 500 && window.timer.isActive(), "500 ms update timer");
         check(window.hasPrevious, "Windows traffic statistics available");
+        check(!window.sampleValid && window.downloadValue->text() == QStringLiteral("—"), "startup shows unavailable until first valid rate");
+        check(window.mini->width() < 500 && window.mini->height() < 300, "new mini window starts compact");
         const int initial = window.chart->downloads.size();
         QTest::qWait(1600);
         check(window.chart->downloads.size() >= initial + 2, "live sampling advances history");
@@ -339,6 +489,7 @@ struct Verification {
             if (!finished) { child.kill(); child.waitForFinished(); }
             if (child.exitCode() != 0) std::cerr << child.readAllStandardError().constData();
         }
+        window.unexportedRecords = false;
         window.session.down = 123;
         for (auto *button : window.findChildren<QPushButton *>())
             if (button->text() == QStringLiteral("清空本次統計")) button->click();
@@ -351,6 +502,7 @@ struct Verification {
         }
         window.mini->hide();
         verifyV12(window, captureDir);
+        verifyV121(window, captureDir);
         window.session.down = 100;
         // 網卡選單：第一項是所有實體網卡、最後一項是全部介面；切換網卡會清空歷史並記住選擇
         check(window.adapterSelector->count() >= 2, "adapter selector populated");
@@ -406,6 +558,13 @@ int main(int argc, char **argv) {
     app.setOrganizationName("RealtimeNetworkSpeed");
     app.setApplicationName("RealtimeNetworkSpeed");
     QSettings::setDefaultFormat(QSettings::IniFormat);
+    if (app.arguments().size() == 3 && app.arguments()[1] == "--check-instance") {
+        SingleInstance instance(app.arguments()[2]); return instance.start() == 0 ? 0 : 1;
+    }
+    if (app.arguments().size() == 4 && app.arguments()[1] == "--check-geometry") {
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, app.arguments()[2]);
+        return Verification::geometryRestored(app.arguments()[3]);
+    }
     if (app.arguments().size() == 4 && app.arguments()[1] == "--check-preference") {
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, app.arguments()[2]);
         return Verification::restored(app.arguments()[3].toInt());
@@ -417,6 +576,7 @@ int main(int argc, char **argv) {
     QTemporaryDir settings(QDir::currentPath() + "/settings-test-XXXXXX");
     check(settings.isValid(), "isolated preference directory");
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    if (app.arguments().contains("--interactive-smoke")) return Verification::interactive(app);
     const QString captures = app.arguments().size() > 1 ? app.arguments()[1] : QString();
     if (!captures.isEmpty()) QDir().mkpath(captures);
     Verification::run(captures, settings.path());
