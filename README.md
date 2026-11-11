@@ -2,7 +2,7 @@
 
 
 **v1.3.0 新增 F10**：「清除歷史流量…」可按網卡／監控範圍及近 7／30 天、自訂日期或全部日期刪除。可先匯出 CSV，確認預設取消；與「清空本次統計」分開，清除後新的有效取樣繼續累積。已通過使用者本機驗收。
-Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++17／Qt 6 Widgets，透過 Windows `GetIfTable2`（iphlpapi）讀取網卡計數器，圖表以 QPainter 繪製，不依賴 Qt Charts。
+Windows x64 即時顯示網路卡下載／上傳速度的小工具。正式 CMake 建置使用 C++23／Qt 6 Widgets，透過 Windows `GetIfTable2`（iphlpapi）讀取網卡計數器，圖表以 QPainter 繪製，不依賴 Qt Charts。
 
 作者：**Kaido-MSVC**。本程式完全在本機執行，不連網、不上傳任何資料。
 
@@ -23,7 +23,7 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。使用 C++1
 - 可自行啟用 HKCU 登入啟動，預設關閉；登入時縮至系統匣。移動程式後須取消並重新勾選以更新路徑。
 - 網卡斷線／恢復及讀取失敗通知預設關閉，三次連續確認後提示，穩定狀態不重複。
 - 迷你視窗可調 50–100% 透明度、小／中／大字體及網卡／本次流量顯示，設定隨既有 INI 保存。
-- 保留 Qt 6.12.0／C++17／MSVC x64、Qt Network、.pro、既有授權及歷史封裝；不增加資料庫、服務、雲端或其他框架。
+- v1.3.0 發布時保留 Qt 6.12.0／C++17／MSVC x64、Qt Network、.pro、既有授權及歷史封裝；不增加資料庫、服務、雲端或其他框架。現行原始碼的 C++23 正式建置需求見下方「建置」。
 
 實作、資料格式、時間規則與測試限制見 [DEVELOPMENT-v1.3.0.md](DEVELOPMENT-v1.3.0.md)。使用者已親自驗收 F01～F10；正式建置與封裝紀錄見 [RELEASE-v1.3.0.md](RELEASE-v1.3.0.md)，版本摘要見 [CHANGELOG.md](CHANGELOG.md)。v1.3.x 以錯誤、安全及必要相容性修正為主。
 
@@ -125,12 +125,16 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 | `LICENSE` | 本程式的 MIT 授權 |
 | `licenses\` | 授權說明與第三方授權全文（打包時複製到 `dist\licenses`） |
 | `app.ico`、`arrow-down.png`、`app_resources.qrc`、`app.rc` | 圖示與資源（`app.ico`、`arrow-down.png` 由作者以 AI／工具產生，與程式碼同樣以 MIT 授權發佈） |
-| `RealtimeNetworkSpeed.pro` | qmake 專案（Qt Creator 可開啟） |
+| `RealtimeNetworkSpeed.pro` | 備用 qmake 專案（維持 C++17，Qt Creator 可開啟） |
 
 `build\`、`dist\`、`archives\` 由建置腳本產生，不在版本庫中。
 
 ## 建置
-環境：Visual Studio 18 2026（MSVC 19.51）、Windows SDK 10.0.28000.0、Qt 6.12.0 官方版 MSVC 2022 x64、CMake 4.4。
+**正式建置方式是 CMake，使用 C++23。** MSVC 最低需求為 **19.52（工具集 14.52）**，舊版本會在 CMake configure 時明確停止。這項版本限制僅針對真正的 MSVC，不會套用到 clang-cl 或其他 C++23 編譯器；其他編譯器未列入本次完整驗證範圍。
+
+已驗證環境：Visual Studio 2026 18.12.0、MSVC 工具集 14.52.37025（cl.exe 19.52.37029.0）、Windows SDK 10.0.28000.0、Qt **6.12.0** 官方版 MSVC 2022 x64、CMake 4.4.4、Ninja 1.13.2、Release x64。升級沒有變更 Qt 或新增功能，驗證與限制見 [DEVELOPMENT-CXX23.md](DEVELOPMENT-CXX23.md)。目前已發布版本仍為上列 v1.3.1。
+
+`RealtimeNetworkSpeed.pro` 暫時維持 **C++17**，僅作為備用 qmake 建置路徑；本次 C++23 結論適用於正式 CMake 路徑，兩者的語言標準不同。Qt Creator 正式開發請開啟 `CMakeLists.txt`。
 
 只支援 Qt 官方安裝版：`licenses\` 的授權說明與原始碼提供方式是依官方未修補的 Qt 6.12.0 寫的。腳本會檢查 Qt 版本（`$expectedQt`），且拒絕含 GLib 的非官方建置。
 
@@ -147,12 +151,22 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 
 **手動建置**：
 
+在指定 MSVC 14.52 的 x64 開發者 PowerShell 中執行，先將 `QT_DIR` 設為 Qt 6.12.0 的 `msvc2022_64` 安裝目錄。Ninja 依目前開發者環境選擇編譯器，不會自行切換到其他已安裝工具集。使用新目錄可保留既有建置：
+
 ```powershell
-cmake -S . -B build -A x64 -DCMAKE_PREFIX_PATH=D:/qt/6.12.0/msvc2022_64 -DBUILD_VERIFICATION=ON
-cmake --build build --config Release
-$env:PATH = "D:\qt\6.12.0\msvc2022_64\bin;" + $env:PATH
-ctest --test-dir build -C Release --output-on-failure
+cmake -S . -B build/cxx23-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:QT_DIR" -DBUILD_VERIFICATION=ON
+cmake --build build/cxx23-release --config Release
+$env:PATH = "$env:QT_DIR\bin;" + $env:PATH
+ctest --test-dir build/cxx23-release -C Release --output-on-failure
 ```
+
+也可在相同開發者環境使用正式腳本執行隔離的 Ninja 建置與全部測試：
+
+```powershell
+pwsh -File build-and-test.ps1 -BuildOnly -Ninja -BuildDirectory build/cxx23-release
+```
+
+`-BuildDirectory` 與 `-Ninja` 僅供 `-BuildOnly` 使用，不執行打包；指定目錄時日誌也寫到該目錄，保留既有 `build-log.txt`。未指定這些選項時，一鍵建置／打包仍沿用既有 Visual Studio 產生器流程。
 
 不需要測試時可省略 `-DBUILD_VERIFICATION=ON`；開啟時另需 Qt6 Test 模組。
 

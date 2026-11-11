@@ -1,9 +1,15 @@
-﻿param([switch]$Pause, [switch]$NoPause, [switch]$BuildOnly)
+﻿param([switch]$Pause, [switch]$NoPause, [switch]$BuildOnly,
+      [string]$BuildDirectory, [switch]$Ninja)
 # 建置、測試並打包「即時網路速度」。輸出同時寫入 build-log.txt。
 # 可用環境變數 QT_DIR 指定 Qt（例如 C:\Qt\6.12.0\msvc2022_64）。
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$log = Join-Path $root 'build-log.txt'
+if (($BuildDirectory -or $Ninja) -and -not $BuildOnly) {
+    throw '-BuildDirectory / -Ninja require -BuildOnly; packaging uses the default Visual Studio build layout.'
+}
+$build = if ($BuildDirectory) { [IO.Path]::GetFullPath($BuildDirectory) } else { Join-Path $root 'build' }
+New-Item -ItemType Directory -Force -Path $build | Out-Null
+$log = if ($BuildDirectory) { Join-Path $build 'build-log.txt' } else { Join-Path $root 'build-log.txt' }
 Set-Content -Path $log -Value "=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 建置開始" -Encoding utf8
 
 function Log([string]$text) { $text | Tee-Object -FilePath $log -Append }
@@ -37,8 +43,14 @@ try {
     Log "PowerShell：$($PSVersionTable.PSVersion)"
     Run 'cmake' @('--version')
 
-    $build = Join-Path $root 'build'
-    Run 'cmake' @('-S', $root, '-B', $build, '-A', 'x64', "-DCMAKE_PREFIX_PATH=$qt", '-DBUILD_VERIFICATION=ON')
+    $configureArgs = @('-S', $root, '-B', $build, "-DCMAKE_PREFIX_PATH=$qt", '-DBUILD_VERIFICATION=ON')
+    if ($Ninja) {
+        if ($env:VSCMD_ARG_TGT_ARCH -ne 'x64') { throw 'Ninja requires an x64 MSVC developer environment.' }
+        $configureArgs += @('-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON')
+    } else {
+        $configureArgs += @('-A', 'x64')
+    }
+    Run 'cmake' $configureArgs
     Run 'cmake' @('--build', $build, '--config', 'Release')
 
     $env:PATH = (Join-Path $qt 'bin') + ';' + $env:PATH
@@ -156,7 +168,7 @@ try {
     # 原始碼：專案根目錄的 .cpp／.h 自動納入（不往下找，避免包進 build、backup 等資料夾）；
     # 其他建置需要的檔案列在下面，新增資源或設定檔時要一併加進清單
     $sourceFiles = @('main.cpp', 'CMakeLists.txt', 'RealtimeNetworkSpeed.pro', 'app.rc', 'app.ico',
-                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'RELEASE-v1.3.1.md')
+                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'DEVELOPMENT-CXX23.md', 'RELEASE-v1.3.1.md')
     foreach ($file in $sourceFiles) { if (-not (Test-Path (Join-Path $root $file))) { throw "原始碼缺少 $file" } }
     $sourceFiles += Get-ChildItem $root -File | Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object Name
     $sourceFiles += Get-RelativeFiles $root @('tests', 'licenses', 'installer')
