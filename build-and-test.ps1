@@ -75,13 +75,14 @@ try {
     }
     Log "VCINSTALLDIR：$env:VCINSTALLDIR"
     Run (Join-Path $qt 'bin\windeployqt.exe') @('--release', '--no-translations', '--compiler-runtime', $exe)
-    # windeployqt 有時找錯 Redist 版本資料夾：改從實際存在的最新版 x64 CRT 資料夾複製
+    # windeployqt 有時找錯 Redist：優先使用建置工具集對應的完整 x64 CRT，再退回可用版本
     if (-not (Test-Path (Join-Path $dist 'vcruntime140.dll')) -and $env:VCINSTALLDIR) {
         $redistRoot = Join-Path $env:VCINSTALLDIR 'Redist\MSVC'
         $crt = Get-ChildItem $redistRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
-            Sort-Object { [version]$_.Name } -Descending |
+            Sort-Object @{Expression={ $_.Name -eq $env:VCToolsVersion }; Descending=$true}, @{Expression={ [version]$_.Name }; Descending=$true} |
             ForEach-Object { Get-ChildItem (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue } |
+            Where-Object { Test-Path (Join-Path $_.FullName 'vcruntime140.dll') } |
             Select-Object -First 1
         if ($crt) {
             Log "複製 MSVC 執行階段：$($crt.FullName)"
@@ -95,9 +96,9 @@ try {
 
     # 只保留程式用得到的 Qt 元件（程式使用 Core／Gui／Widgets／Network（本機介面資訊）；圖示只需要 ICO 外掛）
     # Qt6Pdf（含 PDFium）、Qt6Svg、iconengines 由 windeployqt 依外掛連帶帶入；
-    # opengl32sw.dll（Mesa）、D3Dcompiler_47.dll 是 OpenGL／D3D 備援，Widgets 軟體繪圖用不到
+    # opengl32sw.dll（Mesa）、D3Dcompiler_47.dll、dxcompiler.dll／dxil.dll 是 OpenGL／D3D 備援，Widgets 軟體繪圖用不到
     foreach ($unused in @('tls', 'networkinformation', 'generic', 'Qt6Pdf.dll', 'Qt6Svg.dll',
-                          'iconengines', 'opengl32sw.dll', 'D3Dcompiler_47.dll')) {
+                          'iconengines', 'opengl32sw.dll', 'D3Dcompiler_47.dll', 'dxcompiler.dll', 'dxil.dll')) {
         $path = Join-Path $dist $unused
         if (Test-Path $path) { Remove-Item $path -Recurse -Force; Log "移除未使用：$unused" }
     }
@@ -168,7 +169,7 @@ try {
     # 原始碼：專案根目錄的 .cpp／.h 自動納入（不往下找，避免包進 build、backup 等資料夾）；
     # 其他建置需要的檔案列在下面，新增資源或設定檔時要一併加進清單
     $sourceFiles = @('main.cpp', 'CMakeLists.txt', 'RealtimeNetworkSpeed.pro', 'app.rc', 'app.ico',
-                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'DEVELOPMENT-CXX23.md', 'RELEASE-v1.3.1.md')
+                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'DEVELOPMENT-CXX23.md', 'RELEASE-v1.3.1.md', 'RELEASE-v1.3.2.md')
     foreach ($file in $sourceFiles) { if (-not (Test-Path (Join-Path $root $file))) { throw "原始碼缺少 $file" } }
     $sourceFiles += Get-ChildItem $root -File | Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object Name
     $sourceFiles += Get-RelativeFiles $root @('tests', 'licenses', 'installer')

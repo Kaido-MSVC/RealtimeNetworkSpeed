@@ -1,12 +1,15 @@
 # 版本紀錄
 
-## 未發布 — C++23 工具鏈升級（2026-11-11）
+## v1.3.2 — 2026-11-11
 
 - 正式 CMake 建置改用 C++23；MSVC 最低版本為 19.52（工具集 14.52），舊版明確報錯。
 - 僅真正的 MSVC 修正舊 CMake 的 C++23 旗標映射，保留 clang-cl 的自身設定及未來 CMake 的原生映射。
 - Qt 保持 6.12.0；備用 qmake 路徑維持 C++17。沒有新增產品功能或宣稱效能提升。
 - 正式腳本支援 `-BuildOnly -Ninja -BuildDirectory` 隔離建置與測試，保留既有產物。
-- 相容性及驗證紀錄見 DEVELOPMENT-CXX23.md；不變更 v1.3.1 Tag／Release。
+- 更新建置文件與 Qt／VC++ Runtime 隔離部署驗證；相容性及發布紀錄見 DEVELOPMENT-CXX23.md、RELEASE-v1.3.2.md。既有主要功能及所有歷史 Tag／Release 保留。
+- 封裝腳本同步排除 Widgets 軟體繪圖未使用的 DirectX shader compiler 備援 DLL，延續僅附必要執行依賴的發布方式。
+- CRT 部署備援優先選擇建置工具集對應的完整 x64 執行階段，避免自動選到其他已安裝工具集。
+- English: Official CMake builds use C++23 and MSVC 14.52 or later. CMake standard-flag mapping, older-MSVC rejection and clang-cl detection are improved. Build documentation and deployment validation are updated; Qt 6.12.0 and existing features are unchanged. No performance gain is claimed.
 
 ## v1.3.1 — 2026-11-06
 
