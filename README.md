@@ -6,7 +6,12 @@ Windows x64 即時顯示網路卡下載／上傳速度的小工具。正式 CMak
 
 作者：**Kaido-MSVC**。本程式完全在本機執行，不連網、不上傳任何資料。
 
-最新版本：**v1.3.2**（2026-11-11）。[正式下載與全部附件](https://github.com/Kaido-MSVC/RealtimeNetworkSpeed/releases/tag/v1.3.2)。
+最新版本：**v1.3.3**（2026-11-12）。[正式下載與全部附件](https://github.com/Kaido-MSVC/RealtimeNetworkSpeed/releases/tag/v1.3.3)。
+
+### v1.3.3 建置可重現性與防護強化
+- 正式建置腳本固定 MSVC 工具集 14.52.37025，每次 configure 都重新偵測編譯器，舊 build 快取不再造成失敗。
+- 正式 EXE 啟用 Control Flow Guard 與 CET 相容；功能、資料格式、Qt 6.12.0 與隨附 DLL 均不變。詳見 [v1.3.3 發布驗證](RELEASE-v1.3.3.md)。
+- The build script pins MSVC 14.52.37025 and always reconfigures fresh; the shipped EXE enables Control Flow Guard and CET compatibility. Features, data formats and bundled Qt DLLs are unchanged.
 
 ### v1.3.2 C++23 正式工具鏈升級
 - 正式 CMake 建置升級至 C++23，MSVC 最低為 19.52（工具集 14.52）；修正舊 CMake 的標準旗標映射，避免誤用 c++latest，且不誤套到 clang-cl。
@@ -81,9 +86,9 @@ CSV 新增欄位：`Retained_From,Retained_To,Retention_Hours,Retention_Max_Reco
 
 | 附件 | 內容 |
 | --- | --- |
-| `RealtimeNetworkSpeed-1.3.2-Windows-x64-Setup.exe` | 安裝目前使用者；不要求管理員。可從 Windows 已安裝應用程式移除，設定／歷史保留 |
-| `RealtimeNetworkSpeed-1.3.2-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
-| `RealtimeNetworkSpeed-1.3.2-source.zip` | 本程式原始碼，內容與 `v1.3.2` Tag 相同 |
+| `RealtimeNetworkSpeed-1.3.3-Windows-x64-Setup.exe` | 安裝目前使用者；不要求管理員。可從 Windows 已安裝應用程式移除，設定／歷史保留 |
+| `RealtimeNetworkSpeed-1.3.3-Windows-x64-Portable.zip` | 免安裝版。完整解壓後執行 `RealtimeNetworkSpeed\RealtimeNetworkSpeed.exe` |
+| `RealtimeNetworkSpeed-1.3.3-source.zip` | 本程式原始碼，內容與 `v1.3.3` Tag 相同 |
 | `qtbase-everywhere-src-6.12.0.tar.xz` | 隨附 Qt DLL 的完整對應原始碼（Qt 官方原始碼包，未修改） |
 | `SHA256SUMS.txt` | 上述附件的 SHA-256 |
 
@@ -138,7 +143,7 @@ Qt DLL、外掛與 Visual C++ 執行階段 DLL 都已隨附，不必另外安裝
 ## 建置
 **正式建置方式是 CMake，使用 C++23。** MSVC 最低需求為 **19.52（工具集 14.52）**，舊版本會在 CMake configure 時明確停止。這項版本限制僅針對真正的 MSVC，不會套用到 clang-cl 或其他 C++23 編譯器；其他編譯器未列入本次完整驗證範圍。
 
-已驗證環境：Visual Studio 2026 18.12.0、MSVC 工具集 14.52.37025（cl.exe 19.52.37029.0）、Windows SDK 10.0.28000.0、Qt **6.12.0** 官方版 MSVC 2022 x64、CMake 4.4.4、Ninja 1.13.2、Release x64。升級沒有變更 Qt 或新增功能，驗證與限制見 [DEVELOPMENT-CXX23.md](DEVELOPMENT-CXX23.md)。本次正式版本為 v1.3.2。
+已驗證環境：Visual Studio 2026 18.12.0、MSVC 工具集 14.52.37025（cl.exe 19.52.37029.0）、Windows SDK 10.0.28000.0、Qt **6.12.0** 官方版 MSVC 2022 x64、CMake 4.4.4、Ninja 1.13.2、Release x64。升級沒有變更 Qt 或新增功能，驗證與限制見 [DEVELOPMENT-CXX23.md](DEVELOPMENT-CXX23.md)。本次正式版本為 v1.3.3。
 
 `RealtimeNetworkSpeed.pro` 暫時維持 **C++17**，僅作為備用 qmake 建置路徑；本次 C++23 結論適用於正式 CMake 路徑，兩者的語言標準不同。Qt Creator 正式開發請開啟 `CMakeLists.txt`。
 

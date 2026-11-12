@@ -1,10 +1,12 @@
 # 版本紀錄
 
-## 未發布 — 建置可重現性與防護強化（2026-11-12）
+## v1.3.3 — 2026-11-12
 
 - 正式腳本的 Visual Studio 產生器固定 MSVC 工具集 14.52.37025（可用 `-Toolset` 指定），CRT 備援依同一版本選擇。
 - configure 一律 `--fresh`，避免舊 build 快取沿用已移除的 14.51 工具集而失敗。
 - 正式 EXE 啟用 Control Flow Guard 與 CET 相容旗標；不變更 C++ 程式碼與功能。
+- 發布驗證紀錄見 RELEASE-v1.3.3.md。
+- English: The build script pins MSVC toolset 14.52.37025 (override with `-Toolset`), always reconfigures with `--fresh`, and the shipped EXE now enables Control Flow Guard and CET compatibility. No C++ source or feature changes.
 
 ## v1.3.2 — 2026-11-11
 

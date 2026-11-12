@@ -176,7 +176,7 @@ try {
     # 原始碼：專案根目錄的 .cpp／.h 自動納入（不往下找，避免包進 build、backup 等資料夾）；
     # 其他建置需要的檔案列在下面，新增資源或設定檔時要一併加進清單
     $sourceFiles = @('main.cpp', 'CMakeLists.txt', 'RealtimeNetworkSpeed.pro', 'app.rc', 'app.ico',
-                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'DEVELOPMENT-CXX23.md', 'RELEASE-v1.3.1.md', 'RELEASE-v1.3.2.md')
+                     'app_resources.qrc', 'arrow-down.png', 'LICENSE', 'README.md', 'build-and-test.ps1', 'build-and-test.cmd', 'build-installer.ps1', 'CHANGELOG.md', 'DEVELOPMENT-v1.3.1.md', 'DEVELOPMENT-CXX23.md', 'RELEASE-v1.3.1.md', 'RELEASE-v1.3.2.md', 'RELEASE-v1.3.3.md')
     foreach ($file in $sourceFiles) { if (-not (Test-Path (Join-Path $root $file))) { throw "原始碼缺少 $file" } }
     $sourceFiles += Get-ChildItem $root -File | Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object Name
     $sourceFiles += Get-RelativeFiles $root @('tests', 'licenses', 'installer')
