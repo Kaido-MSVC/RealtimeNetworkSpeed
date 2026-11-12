@@ -1,5 +1,6 @@
 ﻿param([switch]$Pause, [switch]$NoPause, [switch]$BuildOnly,
-      [string]$BuildDirectory, [switch]$Ninja)
+      [string]$BuildDirectory, [switch]$Ninja,
+      [string]$Toolset = 'version=14.52.37025')
 # 建置、測試並打包「即時網路速度」。輸出同時寫入 build-log.txt。
 # 可用環境變數 QT_DIR 指定 Qt（例如 C:\Qt\6.12.0\msvc2022_64）。
 $ErrorActionPreference = 'Stop'
@@ -43,13 +44,19 @@ try {
     Log "PowerShell：$($PSVersionTable.PSVersion)"
     Run 'cmake' @('--version')
 
-    $configureArgs = @('-S', $root, '-B', $build, "-DCMAKE_PREFIX_PATH=$qt", '-DBUILD_VERIFICATION=ON')
+    # --fresh：每次重新偵測編譯器，避免沿用已移除或已更換工具集的舊快取
+    $configureArgs = @('--fresh', '-S', $root, '-B', $build, "-DCMAKE_PREFIX_PATH=$qt", '-DBUILD_VERIFICATION=ON')
     if ($Ninja) {
+        # Ninja 使用目前開發者環境（vcvarsall -vcvars_ver）選定的工具集
         if ($env:VSCMD_ARG_TGT_ARCH -ne 'x64') { throw 'Ninja requires an x64 MSVC developer environment.' }
         $configureArgs += @('-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON')
+        $toolsVersion = $env:VCToolsVersion
     } else {
-        $configureArgs += @('-A', 'x64')
+        # 固定工具集，VS 更新預設版本時不會自動換用
+        $configureArgs += @('-A', 'x64', '-T', $Toolset)
+        $toolsVersion = if ($Toolset -match 'version=(\d+\.\d+\.\d+)') { $Matches[1] } else { $env:VCToolsVersion }
     }
+    Log "MSVC 工具集：$(if ($toolsVersion) { $toolsVersion } else { '未指定' })"
     Run 'cmake' $configureArgs
     Run 'cmake' @('--build', $build, '--config', 'Release')
 
@@ -80,7 +87,7 @@ try {
         $redistRoot = Join-Path $env:VCINSTALLDIR 'Redist\MSVC'
         $crt = Get-ChildItem $redistRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
-            Sort-Object @{Expression={ $_.Name -eq $env:VCToolsVersion }; Descending=$true}, @{Expression={ [version]$_.Name }; Descending=$true} |
+            Sort-Object @{Expression={ $_.Name -eq $toolsVersion }; Descending=$true}, @{Expression={ [version]$_.Name }; Descending=$true} |
             ForEach-Object { Get-ChildItem (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue } |
             Where-Object { Test-Path (Join-Path $_.FullName 'vcruntime140.dll') } |
             Select-Object -First 1

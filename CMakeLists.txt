@@ -34,7 +34,9 @@ configure_file(app.ico app.ico COPYONLY)
 target_link_libraries(RealtimeNetworkSpeed PRIVATE Qt6::Widgets Qt6::Network iphlpapi)
 target_compile_features(RealtimeNetworkSpeed PRIVATE cxx_std_23)
 if(MSVC)
-    target_compile_options(RealtimeNetworkSpeed PRIVATE /utf-8)
+    target_compile_options(RealtimeNetworkSpeed PRIVATE /utf-8 /guard:cf)
+    # Control Flow Guard and CET shadow-stack compatibility for the shipped EXE.
+    target_link_options(RealtimeNetworkSpeed PRIVATE /guard:cf /CETCOMPAT)
 endif()
 
 option(BUILD_VERIFICATION "Build unit and UI verification" OFF)
